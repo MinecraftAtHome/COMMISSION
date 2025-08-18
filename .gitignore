@@ -2,3 +2,5 @@
 ./*.a
 ./main-sb*
 ./main-lb*
+output.txt
+seeds.txt
