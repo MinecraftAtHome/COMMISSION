@@ -15,15 +15,15 @@ jobs:
     steps:
       - name: Install GCC 11
         run: |
-          sudo apt-get update
-          sudo apt-get install -y software-properties-common
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install -y g++-11
+          apt-get update
+          apt-get install -y software-properties-common
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get update
+          apt-get install -y g++-11
       - uses: actions/checkout@v4
       - name: Build (Linux, LARGE_BIOMES=${{ matrix.biomes }})
         run: |
-          make LARGE_BIOMES=${{ matrix.biomes }}
+          make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.repository.name }}.${{ github.ref_name }}.${{ github.run_id }}.linux_x86.biomes${{ matrix.biomes }}
@@ -43,6 +43,7 @@ jobs:
         with:
           update: true
           msystem: MINGW64
+          path-type: inherit
           install: >-
             make
             mingw-w64-x86_64-gcc
@@ -72,13 +73,13 @@ jobs:
           xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\cuda_cccl-windows-x86_64-12.6.77-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6" /E /I /H /Y
       - name: Add CUDA to PATH
         run: |
-          echo "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "CUDA_PATH=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build with Makefile (Windows, LARGE_BIOMES=${{ matrix.biomes }})
         shell: msys2 {0}
         run: |
-          make LARGE_BIOMES=${{ matrix.biomes }}
+          make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.repository.name }}.${{ github.ref_name }}.${{ github.run_id }}.windows_x86.biomes${{ matrix.biomes }}
