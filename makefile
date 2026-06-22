@@ -72,14 +72,14 @@ all: main
 clean:
 	rm -f main libcubiomes.a biomenoise.o biomes.o finders.o generator.o layers.o noise.o cubiomes.o gpu.o cpu.o client.o server.o
 
-libcubiomes.a:
+libcubiomes.a: $(CUBIOMES_SRC)
 	$(CC) -c $(CUBIOMES_SRC) -fwrapv $(CFLAGS)
 	$(AR) rcs libcubiomes.a biomenoise.o biomes.o finders.o generator.o layers.o noise.o
 
 cubiomes.o: src/cubiomes.c src/cubiomes.h
 	$(CC) -c $< -o $@ $(CFLAGS)
 
-gpu.o: src/gpu.cu src/gpu.h src/common.h src/Random.h
+gpu.o: src/gpu.cu src/gpu.h src/common.h src/Random.h src/kernel_0A.h src/kernel_0B.h
 	nvcc -c $< -o $@ $(NVCC_FLAGS)
 
 cpu.o: src/cpu.cpp src/cpu.h src/common.h src/cubiomes.h

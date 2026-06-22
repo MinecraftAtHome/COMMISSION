@@ -112,6 +112,7 @@ struct Args {
                 auto address = split_address(argv[i++]);
                 if (!address) {
                     std::fprintf(stderr, "invalid argument to --client\n");
+                    return false;
                 }
                 client = std::move(address);
             } else if (std::strcmp("--server", arg) == 0) {
@@ -120,6 +121,7 @@ struct Args {
                 auto address = split_address(argv[i++]);
                 if (!address) {
                     std::fprintf(stderr, "invalid argument to --server\n");
+                    return false;
                 }
                 server = std::move(address);
             } else if (std::strcmp("--output", arg) == 0) {
@@ -303,11 +305,13 @@ int main_inner(int argc, char **argv) {
     if (output_file != nullptr) {
         std::fclose(output_file);
     }
+
+    return 0;
 }
 
 int main(int argc, char **argv) {
     try {
-        main_inner(argc, argv);
+        return main_inner(argc, argv);
     } catch (std::exception &e) {
         std::fprintf(stderr, "Uncaught exception in main: %s\n", e.what());
         std::abort();

@@ -1675,7 +1675,7 @@ void GpuThread::run() {
   std::printf("Initializing device %d\n", device);
 
   TRY_CUDA(cudaSetDevice(device));
-  cudaFuncSetAttribute(KernelFilterGradVecs1::kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+  TRY_CUDA(cudaFuncSetAttribute(KernelFilterGradVecs1::kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100));
   init_grad_dot_table();
   init_conv_kernels();
 
