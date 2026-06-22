@@ -6,25 +6,28 @@ PRINT_INTERVAL ?= 4096
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
 # - Everything else: use native
-# Override manually with: make GPU_ARCH=sm_89
-ifndef GPU_ARCH
+# Override manually with: make ARCH=sm_89
+ifndef ARCH
   GPU_NAMES := $(shell nvidia-smi --query-gpu=name --format=csv,noheader)
   ifneq (,$(findstring RTX 40,$(GPU_NAMES)))
-    GPU_ARCH := sm_89
+    ARCH := sm_89
   else ifneq (,$(findstring RTX 50,$(GPU_NAMES)))
-    GPU_ARCH := sm_89
+    ARCH := sm_89
   else
-    GPU_ARCH := native
+    ARCH := native
   endif
 endif
 
-$(info Using GPU_ARCH = $(GPU_ARCH))
+$(info Using ARCH = $(ARCH))
 override CFLAGS += -O3
 override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) -DOMISSION_UNBOUND=$(UNBOUND) -DPRINT_INTERVAL=$(PRINT_INTERVAL)
-override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per-thread -arch=$(GPU_ARCH) -use_fast_math
+override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per-thread -arch=$(ARCH) -use_fast_math
 
 ifeq ($(OS),Windows_NT)
 all: main.exe
+
+clean:
+	del /Q main.exe
 
 # nvcc src/*.cpp src/*.c src/*.cu -o main.exe cubiomes/biomenoise.c cubiomes/biomes.c cubiomes/finders.c cubiomes/generator.c cubiomes/layers.c cubiomes/noise.c -arch=native -O3 -std=c++20 -I asio-1.34.2/include -DOMISSION_LARGE_BIOMES=1 --expt-relaxed-constexpr --default-stream per-thread -D_WIN32_WINNT=0x0601
 main.exe: src/*.*
