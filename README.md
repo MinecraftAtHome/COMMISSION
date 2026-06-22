@@ -23,12 +23,14 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
 ### Runtime arguments
 ```
 ```
+```
 ./main [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>]
 ```
 
+
 - client and server options aren't often used, they were created to network together multiple computers running this app.
 
-```
+
 ### Info about device numbers
 - These are just numbers given by the driver to identify your GPUs. You'll probably need to do this via trial and error if you have multiple gpus and you only want some of them running this.
 - You could also omit the `--devices` option altogether. Then it'll just use `device 0`.
