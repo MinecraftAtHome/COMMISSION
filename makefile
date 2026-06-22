@@ -2,7 +2,7 @@ CUBIOMES_SRC := $(addprefix cubiomes/,biomenoise.c biomes.c finders.c generator.
 
 LARGE_BIOMES ?= 0
 UNBOUND ?= 0
-PRINT_INTERVAL ?= 4096
+PRINT_INTERVAL ?= 256
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
 # - Everything else: use native
