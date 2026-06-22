@@ -2,7 +2,7 @@ CUBIOMES_SRC := $(addprefix cubiomes/,biomenoise.c biomes.c finders.c generator.
 
 LARGE_BIOMES ?= 0
 UNBOUND ?= 0
-PRINT_INTERVAL ?= 4096
+PRINT_INTERVAL ?= 256
 BLACKWELL_GPU := $(shell { nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | grep -Eq '^(10|12)\.' || nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -Eiq 'Blackwell|GeForce RTX 50[0-9]+|GB10|GB20[0-9]|B[23]00'; } && echo 1)
 ifeq ($(origin ARCH), undefined)
 ifeq ($(BLACKWELL_GPU),1)
