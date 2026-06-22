@@ -20,11 +20,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y build-essential g++-11
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build (Linux, LARGE_BIOMES=${{ matrix.biomes }})
         run: |
           make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89 CC=gcc-11 CXX=g++-11
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}.${{ github.run_id }}.linux_x86.biomes${{ matrix.biomes }}
           path: ./main
@@ -36,7 +36,7 @@ jobs:
       matrix:
         biomes: [0, 1]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Install MSYS2 + Make
         uses: msys2/setup-msys2@v2
@@ -80,7 +80,7 @@ jobs:
         shell: msys2 {0}
         run: |
           make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}.${{ github.run_id }}.windows_x86.biomes${{ matrix.biomes }}
           path: ./main.exe
