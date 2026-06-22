@@ -26,12 +26,17 @@ override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per
 ifeq ($(OS),Windows_NT)
 all: main.exe
 
+SRC_CPP := $(wildcard src/*.cpp)
+SRC_C   := $(wildcard src/*.c)
+SRC_CU  := $(wildcard src/*.cu)
+SRC     := $(SRC_CPP) $(SRC_C) $(SRC_CU)
+
 clean:
 	del /Q main.exe
 
 # nvcc src/*.cpp src/*.c src/*.cu -o main.exe cubiomes/biomenoise.c cubiomes/biomes.c cubiomes/finders.c cubiomes/generator.c cubiomes/layers.c cubiomes/noise.c -arch=native -O3 -std=c++20 -I asio-1.34.2/include -DOMISSION_LARGE_BIOMES=1 --expt-relaxed-constexpr --default-stream per-thread -D_WIN32_WINNT=0x0601
-main.exe: src/*.*
-	nvcc src/*.cpp src/*.c src/*.cu $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
+main.exe: $(SRC) $(CUBIOMES_SRC)
+	nvcc $(SRC) $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
 else
 override NVCC_FLAGS += -ccbin $(CXX)
 
