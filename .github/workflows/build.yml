@@ -8,22 +8,22 @@ jobs:
   linux_cuda:
     name: cuda/release/linux
     runs-on: ubuntu-latest
-    container: nvidia/cuda:12.6.3-devel-ubuntu20.04
+    container: nvidia/cuda:12.6.3-devel-ubuntu22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
     strategy:
       matrix:
         biomes: [0, 1]
     steps:
-      - name: Install GCC 11
+      - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y software-properties-common
-          add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          apt-get update
-          apt-get install -y g++-11
+          apt-get install -y build-essential g++-11
       - uses: actions/checkout@v4
       - name: Build (Linux, LARGE_BIOMES=${{ matrix.biomes }})
         run: |
-          make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89
+          make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89 CC=gcc-11 CXX=g++-11
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.repository.name }}.${{ github.ref_name }}.${{ github.run_id }}.linux_x86.biomes${{ matrix.biomes }}
@@ -31,7 +31,7 @@ jobs:
   
   windows_cuda:
     name: cuda/release/windows
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       matrix:
         biomes: [0, 1]
