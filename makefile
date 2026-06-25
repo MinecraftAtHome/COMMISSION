@@ -3,6 +3,7 @@ CUBIOMES_SRC := $(addprefix cubiomes/,biomenoise.c biomes.c finders.c generator.
 LARGE_BIOMES ?= 0
 UNBOUND ?= 0
 PRINT_INTERVAL ?= 256
+OUT ?= main.exe
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
 # - Everything else: use native
@@ -20,11 +21,18 @@ endif
 
 $(info Using ARCH = $(ARCH))
 override CFLAGS += -O3
-override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) -DOMISSION_UNBOUND=$(UNBOUND) -DPRINT_INTERVAL=$(PRINT_INTERVAL)
+override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include \
+	-DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) \
+	-DOMISSION_UNBOUND=$(UNBOUND) \
+	-DPRINT_INTERVAL=$(PRINT_INTERVAL)
+
 override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per-thread -arch=$(ARCH) -use_fast_math
 
 ifeq ($(OS),Windows_NT)
+
 all: main.exe
+
+all4: SB.exe USB.exe LB.exe ULB.exe
 
 SRC_CPP := $(wildcard src/*.cpp)
 SRC_C   := $(wildcard src/*.c)
@@ -33,11 +41,36 @@ SRC     := $(SRC_CPP) $(SRC_C) $(SRC_CU)
 
 clean:
 	del /Q main.exe
-
-# nvcc src/*.cpp src/*.c src/*.cu -o main.exe cubiomes/biomenoise.c cubiomes/biomes.c cubiomes/finders.c cubiomes/generator.c cubiomes/layers.c cubiomes/noise.c -arch=native -O3 -std=c++20 -I asio-1.34.2/include -DOMISSION_LARGE_BIOMES=1 --expt-relaxed-constexpr --default-stream per-thread -D_WIN32_WINNT=0x0601
+	
 main.exe: $(SRC) $(CUBIOMES_SRC)
 	nvcc $(SRC) $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
+
+SB.exe:
+	$(MAKE) OUT=SB.exe LARGE_BIOMES=0 UNBOUND=0 build
+
+USB.exe:
+	$(MAKE) OUT=USB.exe LARGE_BIOMES=0 UNBOUND=1 build
+
+LB.exe:
+	$(MAKE) OUT=LB.exe LARGE_BIOMES=1 UNBOUND=0 build
+
+ULB.exe:
+	$(MAKE) OUT=ULB.exe LARGE_BIOMES=1 UNBOUND=1 build
+
+build: $(SRC) $(CUBIOMES_SRC)
+	nvcc $(SRC) $(CUBIOMES_SRC) -o $(OUT) \
+		-O3 -std=c++20 \
+		-I asio/asio/include \
+		-DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) \
+		-DOMISSION_UNBOUND=$(UNBOUND) \
+		-DPRINT_INTERVAL=$(PRINT_INTERVAL) \
+		--expt-relaxed-constexpr \
+		--default-stream per-thread \
+		-arch=native \
+		-D_WIN32_WINNT=0x0601
+
 else
+
 override NVCC_FLAGS += -ccbin $(CXX)
 
 MAIN_SRC := src/main.cpp
@@ -93,4 +126,5 @@ server.o: src/server.cpp src/server.h src/common.h
 
 main: $(MAIN_DEP)
 	$(MAIN_CXX) $(MAIN_SRC) -o $@ $(MAIN_CXXFLAGS)
+
 endif

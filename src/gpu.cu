@@ -1,5 +1,6 @@
 #include "Random.h"
 #include "gpu.h"
+#include "config.h"
 
 #include <array>
 #include <bit>
@@ -115,6 +116,9 @@ make_normal_noise_config(const NoiseParameters<N> &noise_parameters, const XrsrF
   return res;
 }
 
+__device__ constexpr auto continentalness_config = make_normal_noise_config(continentalness_parameters, hash_continentalness);
+__device__ constexpr auto continentalness_large_config = make_normal_noise_config(continentalness_large_parameters, hash_continentalness_large);
+__device__ constexpr auto chosen_continentalness_config = large_biomes ? continentalness_large_config : continentalness_config;
 __device__ constexpr auto continentalness_config = make_normal_noise_config(continentalness_parameters, hash_continentalness);
 __device__ constexpr auto continentalness_large_config = make_normal_noise_config(continentalness_large_parameters, hash_continentalness_large);
 __device__ constexpr auto chosen_continentalness_config = large_biomes ? continentalness_large_config : continentalness_config;
@@ -444,6 +448,12 @@ struct SeedPos {
   int32_t z;
 };
 
+struct SeedPos {
+  uint32_t seed_index;
+  int32_t x;
+  int32_t z;
+};
+
 namespace KernelSeed1 {
 constexpr uint32_t threads_per_run = UINT64_C(1) << 16;
 constexpr uint32_t threads_per_block = 32;
@@ -472,6 +482,7 @@ struct Result {
 template <size_t Octaves> struct ResultSampler {
   ImprovedNoise octaves[Octaves];
 
+__device__ float sample_only_a(const GradDotTable &table, int32_t x,
 __device__ float sample_only_a(const GradDotTable &table, int32_t x,
                                  int32_t y, int32_t z) const {
     float val = 0;
@@ -589,6 +600,72 @@ __global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<uint64_t
 
   init_octave(noise_b_fork, device_chosen_continentalness_config.octaves_b[0].fork_hash, results, &Result::continentalness_0B, block_base, input_len, active);
   init_octave(noise_b_fork, device_chosen_continentalness_config.octaves_b[1].fork_hash, results, &Result::continentalness_1B, block_base, input_len, active);
+}
+
+__device__ void copy_noise_direct(const ImprovedNoise &shared_noise, Result *results, ImprovedNoise Result::*result_member, uint32_t seed_index) {
+  constexpr uint32_t u4_per_struct = sizeof(ImprovedNoise) / sizeof(uint4);
+  ImprovedNoise &dst = results[seed_index].*result_member;
+  const uint4 *src = reinterpret_cast<const uint4 *>(&shared_noise);
+  uint4 *dst_words = reinterpret_cast<uint4 *>(&dst);
+#pragma unroll
+  for (uint32_t word_idx = 0; word_idx < u4_per_struct; word_idx++) {
+    dst_words[word_idx] = src[word_idx];
+  }
+}
+
+__device__ void init_octave_direct(ImprovedNoise &shared_noise, const XrsrRandomFork &noise_fork, const XrsrForkHash &fork_hash, Result *results, ImprovedNoise Result::*result_member, uint32_t seed_index) {
+  init_noise(shared_noise, noise_fork.from(fork_hash));
+  copy_noise_direct(shared_noise, results, result_member, seed_index);
+}
+
+template <uint32_t Stage>
+__global__ __launch_bounds__(threads_per_block) void late_kernel(InputBuffer<uint64_t> seeds, InputBuffer<SeedPos> inputs, Result *results, uint32_t *init_flags) {
+  __shared__ alignas(16) ImprovedNoise shared_noise[threads_per_block];
+
+  const uint32_t inputs_len = *inputs.len;
+  for (uint32_t input_index = blockIdx.x * blockDim.x + threadIdx.x; input_index < inputs_len; input_index += gridDim.x * blockDim.x) {
+    const uint32_t seed_index = inputs.data[input_index].seed_index;
+    if (atomicCAS(&init_flags[seed_index], Stage - 1u, Stage) != Stage - 1u) {
+      continue;
+    }
+
+    const uint64_t seed = seeds.data[seed_index];
+    const auto seed_fork = XrsrRandom_seed_fork(seed);
+    auto noise_random = seed_fork.from(device_chosen_continentalness_config.fork_hash);
+
+    XrsrRandomFork noise_a_fork, noise_b_fork;
+    XrsrRandom_double_fork(noise_random, noise_a_fork, noise_b_fork);
+
+    ImprovedNoise &noise = shared_noise[threadIdx.x];
+    if constexpr (Stage == 1) {
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[2].fork_hash, results, &Result::continentalness_2A, seed_index);
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[3].fork_hash, results, &Result::continentalness_3A, seed_index);
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[4].fork_hash, results, &Result::continentalness_4A, seed_index);
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[5].fork_hash, results, &Result::continentalness_5A, seed_index);
+
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[2].fork_hash, results, &Result::continentalness_2B, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[3].fork_hash, results, &Result::continentalness_3B, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[4].fork_hash, results, &Result::continentalness_4B, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[5].fork_hash, results, &Result::continentalness_5B, seed_index);
+    } else if constexpr (Stage == 2) {
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[6].fork_hash, results, &Result::continentalness_6A, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[6].fork_hash, results, &Result::continentalness_6B, seed_index);
+    } else if constexpr (Stage == 3) {
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[7].fork_hash, results, &Result::continentalness_7A, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[7].fork_hash, results, &Result::continentalness_7B, seed_index);
+    } else if constexpr (Stage == 4) {
+    init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[8].fork_hash, results, &Result::continentalness_8A, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[8].fork_hash, results, &Result::continentalness_8B, seed_index);
+    }
+  }
+}
+
+template <uint32_t Stage>
+void run_late(InputBuffer<uint64_t> seeds, InputBuffer<SeedPos> inputs, Result *results, uint32_t *init_flags, cudaStream_t stream) {
+  late_kernel<Stage><<<1024, threads_per_block, 0, stream>>>(seeds, inputs, results, init_flags);
+  TRY_CUDA(cudaGetLastError());
+}
+} // namespace KernelSeed1
 }
 
 __device__ void copy_noise_direct(const ImprovedNoise &shared_noise, Result *results, ImprovedNoise Result::*result_member, uint32_t seed_index) {
@@ -1720,13 +1797,18 @@ void GpuThread::run() {
 
   auto &stage_init_seeds_late_1 = stage_stats.emplace_back("init_seeds_late_1", stage_filter_2_0b.outputs_len, stage_filter_2_0b.outputs_len, 1, outputs_filter_2_0b.max_len);
 
+  auto &stage_init_seeds_late_1 = stage_stats.emplace_back("init_seeds_late_1", stage_filter_2_0b.outputs_len, stage_filter_2_0b.outputs_len, 1, outputs_filter_2_0b.max_len);
+
   using Kernel2RunFunc = void (*)(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs, KernelSeed1::Result *results, cudaStream_t stream);
   struct Filter2Stage {
     Kernel2RunFunc run;
     OutputBuffer<SeedPos> outputs;
     StageStats &stage;
     StageStats *late_stage;
+    StageStats *late_stage;
 
+    Filter2Stage(Kernel2RunFunc run, OutputBuffer<SeedPos> outputs, StageStats &stage, StageStats *late_stage)
+        : run(run), outputs(outputs), stage(stage), late_stage(late_stage) {}
     Filter2Stage(Kernel2RunFunc run, OutputBuffer<SeedPos> outputs, StageStats &stage, StageStats *late_stage)
         : run(run), outputs(outputs), stage(stage), late_stage(late_stage) {}
   };
@@ -1754,6 +1836,7 @@ void GpuThread::run() {
       }
       inputs_len = outputs_len;
 
+      filter_2.emplace_back(filter_2_runs[i], outputs, stage, late_stage);
       filter_2.emplace_back(filter_2_runs[i], outputs, stage, late_stage);
     }
   }
@@ -1790,8 +1873,14 @@ void GpuThread::run() {
     KernelSeed1::run_late<1>(outputs_filter_seeds, outputs_filter_2_0b, results, (uint32_t *)buffer_late_init_flags.data, stream);
     stage_init_seeds_late_1.record(stream);
 
+    TRY_CUDA(cudaMemsetAsync(buffer_late_init_flags.data, 0, sizeof(uint32_t) * KernelSeed1::threads_per_run, stream));
+    KernelSeed1::run_late<1>(outputs_filter_seeds, outputs_filter_2_0b, results, (uint32_t *)buffer_late_init_flags.data, stream);
+    stage_init_seeds_late_1.record(stream);
+
     {
       OutputBuffer<SeedPos> *inputs = &outputs_filter_2_0b;
+      for (size_t filter_index = 0; filter_index < filter_2.size(); filter_index++) {
+        auto &filter = filter_2[filter_index];
       for (size_t filter_index = 0; filter_index < filter_2.size(); filter_index++) {
         auto &filter = filter_2[filter_index];
 
@@ -1854,7 +1943,7 @@ void GpuThread::run() {
       }
     }
 
-    if ((i + 1) % PRINT_INTERVAL == 0) {
+    if ((i + 1) % cfg("default_print_interval", 4096) == 0) {
       auto end = std::chrono::steady_clock::now();
       double host_total_time = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count() * 1e-9;
 
