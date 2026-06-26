@@ -414,13 +414,13 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   }
 
   float c_2A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[2]>(noise_a_yo_fork);
-  score += 0.04f * fabsf(c_2A_yo - 0.5f);
+  score += 0.035f * fabsf(c_2A_yo - 0.5f);
   if (score >= maxScore) {
     return;
   }
 
   float c_2B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[2]>(noise_b_yo_fork);
-  score += 0.04f * fabsf(c_2B_yo - 0.5f);
+  score += 0.035f * fabsf(c_2B_yo - 0.5f);
   if (score >= maxScore) {
     return;
   }
@@ -445,7 +445,7 @@ struct SeedPos {
 };
 
 namespace KernelSeed1 {
-constexpr uint32_t threads_per_run = UINT64_C(1) << 16;
+constexpr uint32_t threads_per_run = UINT64_C(1) << 17;
 constexpr uint32_t threads_per_block = 32;
 
 struct Result {
@@ -680,6 +680,7 @@ void init_conv_kernels() {
   void *device_kernel_0A_addr;
   TRY_CUDA(cudaGetSymbolAddress(&device_kernel_0A_addr, device_kernel_0A));
   TRY_CUDA(cudaMemcpy(device_kernel_0A_addr, temp_0A, sizeof(temp_0A), cudaMemcpyHostToDevice));
+
   float temp_0B[6][6][16][2];
   for (int dny = 0; dny < 2; ++dny) {
     for (int dnx = 0; dnx < 6; ++dnx) {
@@ -731,20 +732,82 @@ __device__ __forceinline__ float score_full_12(
   return score;
 }
 
+template <typename IndexT>
+__device__ __forceinline__ float score_center_2x2_flat(
+  const float* __restrict__ conv_z0,
+  const float* __restrict__ conv_z1,
+  const IndexT* __restrict__ idx0,
+  const IndexT* __restrict__ idx1)
+{
+  return
+    conv_z0[(int(idx0[2]) * 6) + 2] +
+    conv_z0[(int(idx0[3]) * 6) + 3] +
+    conv_z1[(int(idx1[2]) * 6) + 2] +
+    conv_z1[(int(idx1[3]) * 6) + 3];
+}
+
+template <typename IndexT>
+__device__ __forceinline__ float score_full_12_flat(
+  const float* __restrict__ conv_z0,
+  const float* __restrict__ conv_z1,
+  const IndexT* __restrict__ idx0,
+  const IndexT* __restrict__ idx1)
+{
+  float score = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 6; ++i) {
+    score += conv_z0[(int(idx0[i]) * 6) + i];
+    score += conv_z1[(int(idx1[i]) * 6) + i];
+  }
+  return score;
+}
+
+template <typename IndexT>
+__device__ __forceinline__ float score_center_2x2_cached(
+  const float* __restrict__ conv_z0,
+  const float* __restrict__ conv_z1,
+  const IndexT* __restrict__ idx0,
+  const IndexT* __restrict__ idx1,
+  const int32_t nz_masked)
+{
+  return
+    conv_z0[((int(idx0[2]) + nz_masked) * 6) + 2] +
+    conv_z0[((int(idx0[3]) + nz_masked) * 6) + 3] +
+    conv_z1[((int(idx1[2]) + nz_masked) * 6) + 2] +
+    conv_z1[((int(idx1[3]) + nz_masked) * 6) + 3];
+}
+
+template <typename IndexT>
+__device__ __forceinline__ float score_full_12_cached(
+  const float* __restrict__ conv_z0,
+  const float* __restrict__ conv_z1,
+  const IndexT* __restrict__ idx0,
+  const IndexT* __restrict__ idx1,
+  const int32_t nz_masked)
+{
+  float score = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 6; ++i) {
+    score += conv_z0[((int(idx0[i]) + nz_masked) * 6) + i];
+    score += conv_z1[((int(idx1[i]) + nz_masked) * 6) + i];
+  }
+  return score;
+}
+
 namespace KernelFilterGradVecs1 {
 constexpr uint32_t block_dim_x = 256;
 
 __global__
 __launch_bounds__(block_dim_x) void kernel(
-    const InputBuffer<uint64_t> seeds,
-    OutputBuffer<SeedPos> outputs,
-    const KernelSeed1::Result* __restrict__ results)
+  const InputBuffer<uint64_t> seeds,
+  OutputBuffer<SeedPos> outputs,
+  const KernelSeed1::Result* __restrict__ results)
 {
   __shared__ alignas(16) ImprovedNoise oct_0A;
   __shared__ alignas(16) float shared_kernel_0A[6][6][16][2];
 
-  __shared__ float conv_z0[513][6];
-  __shared__ float conv_z1[513][6];
+  __shared__ alignas(16) float conv_z0[512 * 6];
+  __shared__ alignas(16) float conv_z1[512 * 6];
 
   __shared__ alignas(16) uint8_t idx_xy[2][272];
 
@@ -773,6 +836,11 @@ __launch_bounds__(block_dim_x) void kernel(
         p_z[dnz] = oct_0A.p[(nz + dnz) & 0xFF] & 0xF;
       }
 
+      float* row0 = &conv_z0[nz * 6];
+      float* row1 = &conv_z1[nz * 6];
+      float* row0_hi = &conv_z0[(nz + 256) * 6];
+      float* row1_hi = &conv_z1[(nz + 256) * 6];
+
 #pragma unroll
       for (int32_t dnx = 0; dnx < 6; ++dnx) {
         float conv0 = 0.0f;
@@ -785,10 +853,10 @@ __launch_bounds__(block_dim_x) void kernel(
           conv1 += shared_kernel_0A[dnx][dnz][p][1];
         }
 
-        conv_z0[nz][dnx] = conv0;
-        conv_z1[nz][dnx] = conv1;
-        conv_z0[nz + 256][dnx] = conv0;
-        conv_z1[nz + 256][dnx] = conv1;
+        row0[dnx] = conv0;
+        row1[dnx] = conv1;
+        row0_hi[dnx] = conv0;
+        row1_hi[dnx] = conv1;
       }
     }
 
@@ -841,9 +909,9 @@ __launch_bounds__(block_dim_x) void kernel(
         const uint16_t* cw0 = &w0[candidate];
         const uint16_t* cw1 = &w1[candidate];
 
-        const float gate = score_center_2x2(conv_z0, conv_z1, cw0, cw1);
+        const float gate = score_center_2x2_flat(conv_z0, conv_z1, cw0, cw1);
         if (gate >= kGradVecs1PrefilterThreshold) {
-          const float score = score_full_12(conv_z0, conv_z1, cw0, cw1);
+          const float score = score_full_12_flat(conv_z0, conv_z1, cw0, cw1);
           if (score > kGradVecs1FinalThreshold) {
             uint32_t res_idx = atomicAdd(outputs.len, 1);
             if (res_idx < outputs.max_len) {
@@ -869,7 +937,7 @@ void run(
     const KernelSeed1::Result* __restrict__ results,
     cudaStream_t stream)
 {
-  kernel<<<2048, block_dim_x, 0, stream>>>(seeds, outputs, results);
+  kernel<<<8192, block_dim_x, 0, stream>>>(seeds, outputs, results);
   TRY_CUDA(cudaGetLastError());
 }
 } // namespace KernelFilterGradVecs1
@@ -1235,336 +1303,414 @@ void Template<NoiseThreshold, Octaves, PosRange, Samples, MinCount, FlippedSpars
 
 // cactus was here :)
 namespace KernelFilter2_0A {
-using T = KernelFilter2::Template<-5500, 3, 8 * 1024, 256, 27, false, false, true>;
+  using T = KernelFilter2::Template<-5500, 3, 8 * 1024, 256, 27, false, false, true>;
+  static_assert(T::samples == 256);
+  static_assert(T::samples_square_size == 16);
+  static_assert(!T::samples_square_sparse);
+  static_assert(T::octaves == 3 && T::only_a);
+  static_assert(!T::move_center);
 
-static_assert(T::samples == 256);
-static_assert(T::samples_square_size == 16);
-static_assert(!T::samples_square_sparse);
-static_assert(T::octaves == 3 && T::only_a);
-static_assert(!T::move_center);
+  constexpr uint32_t threads_per_block = 256;
+  constexpr uint32_t warps_per_block = threads_per_block / 32;
 
-constexpr uint32_t threads_per_block = 256;
-constexpr uint32_t warps_per_block = threads_per_block / 32;
+  constexpr OctaveConfig cfg0 = chosen_continentalness_config.octaves_a[0];
+  constexpr OctaveConfig cfg1 = chosen_continentalness_config.octaves_a[1];
+  constexpr float if0 = (float)cfg0.input_factor;
+  constexpr float if1 = (float)cfg1.input_factor;
+  constexpr float vf0 = (float)cfg0.value_factor;
+  constexpr float vf1 = (float)cfg1.value_factor;
 
-constexpr OctaveConfig cfg0 = chosen_continentalness_config.octaves_a[0];
-constexpr OctaveConfig cfg1 = chosen_continentalness_config.octaves_a[1];
-constexpr float if0 = (float)cfg0.input_factor;
-constexpr float if1 = (float)cfg1.input_factor;
-constexpr float vf0 = (float)cfg0.value_factor;
-constexpr float vf1 = (float)cfg1.value_factor;
+  constexpr float kPrefilterThreshold = -0.45f;
+  constexpr float kFinalThreshold = T::noise_threshold;
 
-__device__ inline void compute_cell(const ImprovedNoise &noise, int32_t int_x, int32_t int_y, int32_t int_z, uint8_t &c000, uint8_t &c100, uint8_t &c010, uint8_t &c110, uint8_t &c001, uint8_t &c101, uint8_t &c011, uint8_t &c111) {
-  uint8_t p0 = noise.p[(int_x) & 0xFF];
-  uint8_t p1 = noise.p[(int_x + 1) & 0xFF];
-  uint8_t p00 = noise.p[(p0 + int_y) & 0xFF];
-  uint8_t p01 = noise.p[(p0 + int_y + 1) & 0xFF];
-  uint8_t p10 = noise.p[(p1 + int_y) & 0xFF];
-  uint8_t p11 = noise.p[(p1 + int_y + 1) & 0xFF];
-  c000 = noise.p[(p00 + int_z) & 0xFF];
-  c100 = noise.p[(p10 + int_z) & 0xFF];
-  c010 = noise.p[(p01 + int_z) & 0xFF];
-  c110 = noise.p[(p11 + int_z) & 0xFF];
-  c001 = noise.p[(p00 + int_z + 1) & 0xFF];
-  c101 = noise.p[(p10 + int_z + 1) & 0xFF];
-  c011 = noise.p[(p01 + int_z + 1) & 0xFF];
-  c111 = noise.p[(p11 + int_z + 1) & 0xFF];
-}
-
-__device__ inline float interp(const GradDotTable &table, float frac_x, float frac_y, float frac_z, float fx, float fy, float fz, uint8_t c000, uint8_t c100, uint8_t c010, uint8_t c110, uint8_t c001, uint8_t c101, uint8_t c011, uint8_t c111) {
-  float n000 = gradDot(table, c000, frac_x, frac_y, frac_z);
-  float n100 = gradDot(table, c100, frac_x - 1.0f, frac_y, frac_z);
-  float n010 = gradDot(table, c010, frac_x, frac_y - 1.0f, frac_z);
-  float n110 = gradDot(table, c110, frac_x - 1.0f, frac_y - 1.0f, frac_z);
-  float n001 = gradDot(table, c001, frac_x, frac_y, frac_z - 1.0f);
-  float n101 = gradDot(table, c101, frac_x - 1.0f, frac_y, frac_z - 1.0f);
-  float n011 = gradDot(table, c011, frac_x, frac_y - 1.0f, frac_z - 1.0f);
-  float n111 = gradDot(table, c111, frac_x - 1.0f, frac_y - 1.0f, frac_z - 1.0f);
-  return lerp3(fx, fy, fz, n000, n100, n010, n110, n001, n101, n011, n111);
-}
-
-__global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs, KernelSeed1::Result *results) {
-  __shared__ GradDotTable shared_grad_dot_table;
-  __shared__ ImprovedNoise s_oct0[warps_per_block];
-  __shared__ ImprovedNoise s_oct1[warps_per_block];
-
-  for (uint32_t i = threadIdx.x; i < sizeof(shared_grad_dot_table) / sizeof(uint32_t); i += threads_per_block) {
-    reinterpret_cast<uint32_t *>(&shared_grad_dot_table)[i] = reinterpret_cast<uint32_t *>(&device_grad_dot_table)[i];
+  __device__ inline void compute_cell(const ImprovedNoise &noise,
+    int32_t int_x, int32_t int_y, int32_t int_z,
+    uint8_t &c000, uint8_t &c100, uint8_t &c010, uint8_t &c110,
+    uint8_t &c001, uint8_t &c101, uint8_t &c011, uint8_t &c111)
+  {
+    uint8_t p0 = noise.p[(int_x) & 0xFF];
+    uint8_t p1 = noise.p[(int_x + 1) & 0xFF];
+    uint8_t p00 = noise.p[(p0 + int_y) & 0xFF];
+    uint8_t p01 = noise.p[(p0 + int_y + 1) & 0xFF];
+    uint8_t p10 = noise.p[(p1 + int_y) & 0xFF];
+    uint8_t p11 = noise.p[(p1 + int_y + 1) & 0xFF];
+    c000 = noise.p[(p00 + int_z) & 0xFF];
+    c100 = noise.p[(p10 + int_z) & 0xFF];
+    c010 = noise.p[(p01 + int_z) & 0xFF];
+    c110 = noise.p[(p11 + int_z) & 0xFF];
+    c001 = noise.p[(p00 + int_z + 1) & 0xFF];
+    c101 = noise.p[(p10 + int_z + 1) & 0xFF];
+    c011 = noise.p[(p01 + int_z + 1) & 0xFF];
+    c111 = noise.p[(p11 + int_z + 1) & 0xFF];
   }
-  __syncthreads();
 
-  const uint32_t lane = threadIdx.x & 31u;
-  const uint32_t warp_in_block = threadIdx.x >> 5;
-  const uint32_t warp_global = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-  const uint32_t num_warps = (gridDim.x * blockDim.x) >> 5;
-
-  ImprovedNoise &oct0 = s_oct0[warp_in_block];
-  ImprovedNoise &oct1 = s_oct1[warp_in_block];
-
-  const uint32_t z_index = lane >> 1;
-  const uint32_t x_start = (lane & 1u) * 8u;
-
-  constexpr uint32_t words = sizeof(ImprovedNoise) / sizeof(uint32_t);
-
-  uint32_t inputs_len = *inputs.len;
-  for (uint32_t input_index = warp_global; input_index < inputs_len; input_index += num_warps) {
-    const SeedPos input = inputs.data[input_index];
-    const uint32_t seed_index = input.seed_index;
-
-    {
-      const uint32_t *src0 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_0A);
-      const uint32_t *src1 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_1A);
-      uint32_t *dst0 = reinterpret_cast<uint32_t *>(&oct0);
-      uint32_t *dst1 = reinterpret_cast<uint32_t *>(&oct1);
-      for (uint32_t i = lane; i < words; i += 32) {
-        dst0[i] = src0[i];
-        dst1[i] = src1[i];
-      }
-    }
-    __syncwarp();
-
-    const int32_t z_world = input.z + (int32_t)(z_index * T::pos_step) + T::pos_offset;
-    const int32_t x_base = input.x + (int32_t)(x_start * T::pos_step) + T::pos_offset;
-
-    const float y0 = oct0.yo;
-    const int32_t int_y0 = __float2int_rd(y0);
-    const float frac_y0 = y0 - (float)int_y0;
-    const float fy0 = smoothstep(frac_y0);
-    const float z0c = z_world * if0 + oct0.zo;
-    const int32_t int_z0 = __float2int_rd(z0c);
-    const float frac_z0 = z0c - (float)int_z0;
-    const float fz0 = smoothstep(frac_z0);
-
-    const float y1 = oct1.yo;
-    const int32_t int_y1 = __float2int_rd(y1);
-    const float frac_y1 = y1 - (float)int_y1;
-    const float fy1 = smoothstep(frac_y1);
-    const float z1c = z_world * if1 + oct1.zo;
-    const int32_t int_z1 = __float2int_rd(z1c);
-    const float frac_z1 = z1c - (float)int_z1;
-    const float fz1 = smoothstep(frac_z1);
-
-    int32_t cur_ix0 = 0;
-    int32_t cur_ix1 = 0;
-    bool have0 = false;
-    bool have1 = false;
-    uint8_t a000, a100, a010, a110, a001, a101, a011, a111;
-    uint8_t b000, b100, b010, b110, b001, b101, b011, b111;
-
-    uint32_t local_count = 0;
-#pragma unroll
-    for (uint32_t k = 0; k < 8; k++) {
-      const int32_t x_world = x_base + (int32_t)(k * T::pos_step);
-
-      const float x0c = x_world * if0 + oct0.xo;
-      const int32_t int_x0 = __float2int_rd(x0c);
-      const float frac_x0 = x0c - (float)int_x0;
-      if (!have0 || int_x0 != cur_ix0) {
-        compute_cell(oct0, int_x0, int_y0, int_z0, a000, a100, a010, a110, a001, a101, a011, a111);
-        cur_ix0 = int_x0;
-        have0 = true;
-      }
-      const float fx0 = smoothstep(frac_x0);
-      const float noise0 = interp(shared_grad_dot_table, frac_x0, frac_y0, frac_z0, fx0, fy0, fz0, a000, a100, a010, a110, a001, a101, a011, a111);
-
-      const float x1c = x_world * if1 + oct1.xo;
-      const int32_t int_x1 = __float2int_rd(x1c);
-      const float frac_x1 = x1c - (float)int_x1;
-      if (!have1 || int_x1 != cur_ix1) {
-        compute_cell(oct1, int_x1, int_y1, int_z1, b000, b100, b010, b110, b001, b101, b011, b111);
-        cur_ix1 = int_x1;
-        have1 = true;
-      }
-      const float fx1 = smoothstep(frac_x1);
-      const float noise1 = interp(shared_grad_dot_table, frac_x1, frac_y1, frac_z1, fx1, fy1, fz1, b000, b100, b010, b110, b001, b101, b011, b111);
-
-      float val = 0;
-      val += noise0 * vf0;
-      val += noise1 * vf1;
-
-      local_count += (val < T::noise_threshold) ? 1u : 0u;
-    }
-
-    const uint32_t total = warp_reduce_add(local_count);
-    if (lane == 0 && total >= T::min_count) {
-      uint32_t result_index = atomicAdd(outputs.len, 1);
-      if (result_index < outputs.max_len){
-        outputs.data[result_index] = {seed_index, input.x, input.z};
-      }
-    }
-    __syncwarp();
+  __device__ inline float interp(const GradDotTable &table,
+    float frac_x, float frac_y, float frac_z,
+    float fx, float fy, float fz,
+    uint8_t c000, uint8_t c100, uint8_t c010, uint8_t c110,
+    uint8_t c001, uint8_t c101, uint8_t c011, uint8_t c111)
+  {
+    float n000 = gradDot(table, c000, frac_x, frac_y, frac_z);
+    float n100 = gradDot(table, c100, frac_x - 1.0f, frac_y, frac_z);
+    float n010 = gradDot(table, c010, frac_x, frac_y - 1.0f, frac_z);
+    float n110 = gradDot(table, c110, frac_x - 1.0f, frac_y - 1.0f, frac_z);
+    float n001 = gradDot(table, c001, frac_x, frac_y, frac_z - 1.0f);
+    float n101 = gradDot(table, c101, frac_x - 1.0f, frac_y, frac_z - 1.0f);
+    float n011 = gradDot(table, c011, frac_x, frac_y - 1.0f, frac_z - 1.0f);
+    float n111 = gradDot(table, c111, frac_x - 1.0f, frac_y - 1.0f, frac_z - 1.0f);
+    return lerp3(fx, fy, fz, n000, n100, n010, n110, n001, n101, n011, n111);
   }
-}
 
-void run(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs, KernelSeed1::Result *results, cudaStream_t stream) {
-  kernel<<<32 * 256, threads_per_block, 0, stream>>>(inputs, outputs, results);
-  TRY_CUDA(cudaGetLastError());
-}
+  __global__ __launch_bounds__(threads_per_block) void kernel(
+    InputBuffer<SeedPos> inputs,
+    OutputBuffer<SeedPos> outputs,
+    KernelSeed1::Result *results)
+  {
+    __shared__ GradDotTable shared_grad_dot_table;
+    __shared__ ImprovedNoise s_oct0[warps_per_block];
+    __shared__ ImprovedNoise s_oct1[warps_per_block];
+
+    for (uint32_t i = threadIdx.x; i < sizeof(shared_grad_dot_table) / sizeof(uint32_t); i += threads_per_block) {
+      reinterpret_cast<uint32_t *>(&shared_grad_dot_table)[i] = reinterpret_cast<uint32_t *>(&device_grad_dot_table)[i];
+    }
+    __syncthreads();
+
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warp_global = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const uint32_t num_warps = (gridDim.x * blockDim.x) >> 5;
+
+    ImprovedNoise &oct0 = s_oct0[warp_in_block];
+    ImprovedNoise &oct1 = s_oct1[warp_in_block];
+
+    const uint32_t z_index = lane >> 1;
+    const uint32_t x_start = (lane & 1u) * 8u;
+    constexpr uint32_t words = sizeof(ImprovedNoise) / sizeof(uint32_t);
+
+    uint32_t inputs_len = *inputs.len;
+    for (uint32_t input_index = warp_global; input_index < inputs_len; input_index += num_warps) {
+      const SeedPos input = inputs.data[input_index];
+      const uint32_t seed_index = input.seed_index;
+
+      {
+        const uint32_t *src0 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_0A);
+        const uint32_t *src1 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_1A);
+        uint32_t *dst0 = reinterpret_cast<uint32_t *>(&oct0);
+        uint32_t *dst1 = reinterpret_cast<uint32_t *>(&oct1);
+        for (uint32_t i = lane; i < words; i += 32) {
+          dst0[i] = src0[i];
+          dst1[i] = src1[i];
+        }
+      }
+      __syncwarp();
+
+      const int32_t z_world = input.z + (int32_t)(z_index * T::pos_step) + T::pos_offset;
+      const int32_t x_base   = input.x + (int32_t)(x_start * T::pos_step) + T::pos_offset;
+
+      const float y0 = oct0.yo;
+      const int32_t int_y0 = __float2int_rd(y0);
+      const float frac_y0 = y0 - (float)int_y0;
+      const float fy0 = smoothstep(frac_y0);
+
+      const float z0c = z_world * if0 + oct0.zo;
+      const int32_t int_z0 = __float2int_rd(z0c);
+      const float frac_z0 = z0c - (float)int_z0;
+      const float fz0 = smoothstep(frac_z0);
+
+      int32_t cur_ix0 = 0;
+      bool have0 = false;
+      uint8_t a000, a100, a010, a110, a001, a101, a011, a111;
+
+      float noise0_vals[8];
+      uint32_t prefilter_count = 0;
+
+      #pragma unroll
+      for (uint32_t k = 0; k < 8; k++) {
+        const int32_t x_world = x_base + (int32_t)(k * T::pos_step);
+        const float x0c = x_world * if0 + oct0.xo;
+        const int32_t int_x0 = __float2int_rd(x0c);
+        const float frac_x0 = x0c - (float)int_x0;
+
+        if (!have0 || int_x0 != cur_ix0) {
+          compute_cell(oct0, int_x0, int_y0, int_z0,
+                        a000, a100, a010, a110, a001, a101, a011, a111);
+          cur_ix0 = int_x0;
+          have0 = true;
+        }
+        const float fx0 = smoothstep(frac_x0);
+        const float noise0 = interp(shared_grad_dot_table,
+                                    frac_x0, frac_y0, frac_z0,
+                                    fx0, fy0, fz0,
+                                    a000, a100, a010, a110,
+                                    a001, a101, a011, a111);
+        noise0_vals[k] = noise0 * vf0;
+        prefilter_count += (noise0_vals[k] < kPrefilterThreshold) ? 1u : 0u;
+      }
+
+      uint32_t prefilter_total = warp_reduce_add(prefilter_count);
+
+      if (prefilter_total >= T::min_count) {
+        const float y1 = oct1.yo;
+        const int32_t int_y1 = __float2int_rd(y1);
+        const float frac_y1 = y1 - (float)int_y1;
+        const float fy1 = smoothstep(frac_y1);
+
+        const float z1c = z_world * if1 + oct1.zo;
+        const int32_t int_z1 = __float2int_rd(z1c);
+        const float frac_z1 = z1c - (float)int_z1;
+        const float fz1 = smoothstep(frac_z1);
+
+        int32_t cur_ix1 = 0;
+        bool have1 = false;
+        uint8_t b000, b100, b010, b110, b001, b101, b011, b111;
+
+        uint32_t local_count = 0;
+
+        #pragma unroll
+        for (uint32_t k = 0; k < 8; k++) {
+          const int32_t x_world = x_base + (int32_t)(k * T::pos_step);
+          const float x1c = x_world * if1 + oct1.xo;
+          const int32_t int_x1 = __float2int_rd(x1c);
+          const float frac_x1 = x1c - (float)int_x1;
+
+          if (!have1 || int_x1 != cur_ix1) {
+            compute_cell(oct1, int_x1, int_y1, int_z1, b000, b100, b010, b110, b001, b101, b011, b111);
+            cur_ix1 = int_x1;
+            have1 = true;
+          }
+          const float fx1 = smoothstep(frac_x1);
+          const float noise1 = interp(shared_grad_dot_table,
+                                      frac_x1, frac_y1, frac_z1,
+                                      fx1, fy1, fz1,
+                                      b000, b100, b010, b110,
+                                      b001, b101, b011, b111);
+          float val = noise0_vals[k] + noise1 * vf1;
+          local_count += (val < kFinalThreshold) ? 1u : 0u;
+        }
+
+        const uint32_t total = warp_reduce_add(local_count);
+        if (lane == 0 && total >= T::min_count) {
+          uint32_t result_index = atomicAdd(outputs.len, 1);
+          if (result_index < outputs.max_len) {
+            outputs.data[result_index] = {seed_index, input.x, input.z};
+          }
+        }
+      }
+      __syncwarp();
+    }
+  }
+
+  void run(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs,
+    KernelSeed1::Result *results, cudaStream_t stream) {
+    kernel<<<32 * 256, threads_per_block, 0, stream>>>(inputs, outputs, results);
+    TRY_CUDA(cudaGetLastError());
+  }
 } // namespace KernelFilter2_0A
 
 namespace KernelFilter2_0B {
-using T = KernelFilter2::Template<-5500, 3, 8 * 1024, 256, 20, false, false, false>;
+  using T = KernelFilter2::Template<-5500, 3, 8 * 1024, 256, 20, false, false, false>;
+  static_assert(T::samples == 256);
+  static_assert(T::samples_square_size == 16);
+  static_assert(!T::samples_square_sparse);
+  static_assert(T::octaves == 3 && !T::only_a);
+  static_assert(!T::move_center);
 
-static_assert(T::samples == 256);
-static_assert(T::samples_square_size == 16);
-static_assert(!T::samples_square_sparse);
-static_assert(T::octaves == 3 && !T::only_a);
-static_assert(!T::move_center);
+  constexpr uint32_t threads_per_block = 256;
+  constexpr uint32_t warps_per_block = threads_per_block / 32;
 
-constexpr uint32_t threads_per_block = 256;
-constexpr uint32_t warps_per_block = threads_per_block / 32;
+  constexpr OctaveConfig cfg0 = chosen_continentalness_config.octaves_b[0];
+  constexpr OctaveConfig cfg1 = chosen_continentalness_config.octaves_b[1];
+  constexpr float if0 = (float)cfg0.input_factor;
+  constexpr float if1 = (float)cfg1.input_factor;
+  constexpr float vf0 = (float)cfg0.value_factor;
+  constexpr float vf1 = (float)cfg1.value_factor;
 
-constexpr OctaveConfig cfg0 = chosen_continentalness_config.octaves_b[0];
-constexpr OctaveConfig cfg1 = chosen_continentalness_config.octaves_b[1];
-constexpr float if0 = (float)cfg0.input_factor;
-constexpr float if1 = (float)cfg1.input_factor;
-constexpr float vf0 = (float)cfg0.value_factor;
-constexpr float vf1 = (float)cfg1.value_factor;
+  constexpr float kPrefilterThreshold = -0.45f;
+  constexpr float kFinalThreshold = T::noise_threshold;
 
-__device__ inline void compute_cell(const ImprovedNoise &noise, int32_t int_x, int32_t int_y, int32_t int_z, uint8_t &c000, uint8_t &c100, uint8_t &c010, uint8_t &c110, uint8_t &c001, uint8_t &c101, uint8_t &c011, uint8_t &c111) {
-  uint8_t p0 = noise.p[(int_x) & 0xFF];
-  uint8_t p1 = noise.p[(int_x + 1) & 0xFF];
-  uint8_t p00 = noise.p[(p0 + int_y) & 0xFF];
-  uint8_t p01 = noise.p[(p0 + int_y + 1) & 0xFF];
-  uint8_t p10 = noise.p[(p1 + int_y) & 0xFF];
-  uint8_t p11 = noise.p[(p1 + int_y + 1) & 0xFF];
-  c000 = noise.p[(p00 + int_z) & 0xFF];
-  c100 = noise.p[(p10 + int_z) & 0xFF];
-  c010 = noise.p[(p01 + int_z) & 0xFF];
-  c110 = noise.p[(p11 + int_z) & 0xFF];
-  c001 = noise.p[(p00 + int_z + 1) & 0xFF];
-  c101 = noise.p[(p10 + int_z + 1) & 0xFF];
-  c011 = noise.p[(p01 + int_z + 1) & 0xFF];
-  c111 = noise.p[(p11 + int_z + 1) & 0xFF];
-}
-
-__device__ inline float interp(const GradDotTable &table, float frac_x, float frac_y, float frac_z, float fx, float fy, float fz, uint8_t c000, uint8_t c100, uint8_t c010, uint8_t c110, uint8_t c001, uint8_t c101, uint8_t c011, uint8_t c111) {
-  float n000 = gradDot(table, c000, frac_x, frac_y, frac_z);
-  float n100 = gradDot(table, c100, frac_x - 1.0f, frac_y, frac_z);
-  float n010 = gradDot(table, c010, frac_x, frac_y - 1.0f, frac_z);
-  float n110 = gradDot(table, c110, frac_x - 1.0f, frac_y - 1.0f, frac_z);
-  float n001 = gradDot(table, c001, frac_x, frac_y, frac_z - 1.0f);
-  float n101 = gradDot(table, c101, frac_x - 1.0f, frac_y, frac_z - 1.0f);
-  float n011 = gradDot(table, c011, frac_x, frac_y - 1.0f, frac_z - 1.0f);
-  float n111 = gradDot(table, c111, frac_x - 1.0f, frac_y - 1.0f, frac_z - 1.0f);
-  return lerp3(fx, fy, fz, n000, n100, n010, n110, n001, n101, n011, n111);
-}
-
-__global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs, KernelSeed1::Result *results) {
-  __shared__ GradDotTable shared_grad_dot_table;
-  __shared__ ImprovedNoise s_oct0[warps_per_block];
-  __shared__ ImprovedNoise s_oct1[warps_per_block];
-
-  for (uint32_t i = threadIdx.x; i < sizeof(shared_grad_dot_table) / sizeof(uint32_t); i += threads_per_block) {
-    reinterpret_cast<uint32_t *>(&shared_grad_dot_table)[i] = reinterpret_cast<uint32_t *>(&device_grad_dot_table)[i];
+  __device__ inline void compute_cell(const ImprovedNoise &noise,
+    int32_t int_x, int32_t int_y, int32_t int_z,
+    uint8_t &c000, uint8_t &c100, uint8_t &c010, uint8_t &c110,
+    uint8_t &c001, uint8_t &c101, uint8_t &c011, uint8_t &c111)
+  {
+    uint8_t p0 = noise.p[(int_x) & 0xFF];
+    uint8_t p1 = noise.p[(int_x + 1) & 0xFF];
+    uint8_t p00 = noise.p[(p0 + int_y) & 0xFF];
+    uint8_t p01 = noise.p[(p0 + int_y + 1) & 0xFF];
+    uint8_t p10 = noise.p[(p1 + int_y) & 0xFF];
+    uint8_t p11 = noise.p[(p1 + int_y + 1) & 0xFF];
+    c000 = noise.p[(p00 + int_z) & 0xFF];
+    c100 = noise.p[(p10 + int_z) & 0xFF];
+    c010 = noise.p[(p01 + int_z) & 0xFF];
+    c110 = noise.p[(p11 + int_z) & 0xFF];
+    c001 = noise.p[(p00 + int_z + 1) & 0xFF];
+    c101 = noise.p[(p10 + int_z + 1) & 0xFF];
+    c011 = noise.p[(p01 + int_z + 1) & 0xFF];
+    c111 = noise.p[(p11 + int_z + 1) & 0xFF];
   }
-  __syncthreads();
 
-  const uint32_t lane = threadIdx.x & 31u;
-  const uint32_t warp_in_block = threadIdx.x >> 5;
-  const uint32_t warp_global = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-  const uint32_t num_warps = (gridDim.x * blockDim.x) >> 5;
-
-  ImprovedNoise &oct0 = s_oct0[warp_in_block];
-  ImprovedNoise &oct1 = s_oct1[warp_in_block];
-
-  const uint32_t z_index = lane >> 1;
-  const uint32_t x_start = (lane & 1u) * 8u;
-
-  constexpr uint32_t words = sizeof(ImprovedNoise) / sizeof(uint32_t);
-
-  uint32_t inputs_len = *inputs.len;
-  for (uint32_t input_index = warp_global; input_index < inputs_len; input_index += num_warps) {
-    const SeedPos input = inputs.data[input_index];
-    const uint32_t seed_index = input.seed_index;
-
-    {
-      const uint32_t *src0 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_0B);
-      const uint32_t *src1 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_1B);
-      uint32_t *dst0 = reinterpret_cast<uint32_t *>(&oct0);
-      uint32_t *dst1 = reinterpret_cast<uint32_t *>(&oct1);
-      for (uint32_t i = lane; i < words; i += 32) {
-        dst0[i] = src0[i];
-        dst1[i] = src1[i];
-      }
-    }
-    __syncwarp();
-
-    const int32_t z_world = input.z + (int32_t)(z_index * T::pos_step) + T::pos_offset;
-    const int32_t x_base = input.x + (int32_t)(x_start * T::pos_step) + T::pos_offset;
-
-    const float y0 = oct0.yo;
-    const int32_t int_y0 = __float2int_rd(y0);
-    const float frac_y0 = y0 - (float)int_y0;
-    const float fy0 = smoothstep(frac_y0);
-    const float z0c = z_world * if0 + oct0.zo;
-    const int32_t int_z0 = __float2int_rd(z0c);
-    const float frac_z0 = z0c - (float)int_z0;
-    const float fz0 = smoothstep(frac_z0);
-    const float y1 = oct1.yo;
-    const int32_t int_y1 = __float2int_rd(y1);
-    const float frac_y1 = y1 - (float)int_y1;
-    const float fy1 = smoothstep(frac_y1);
-    const float z1c = z_world * if1 + oct1.zo;
-    const int32_t int_z1 = __float2int_rd(z1c);
-    const float frac_z1 = z1c - (float)int_z1;
-    const float fz1 = smoothstep(frac_z1);
-
-    int32_t cur_ix0 = 0;
-    int32_t cur_ix1 = 0;
-    bool have0 = false;
-    bool have1 = false;
-    uint8_t a000, a100, a010, a110, a001, a101, a011, a111;
-    uint8_t b000, b100, b010, b110, b001, b101, b011, b111;
-
-    uint32_t local_count = 0;
-#pragma unroll
-    for (uint32_t k = 0; k < 8; k++) {
-      const int32_t x_world = x_base + (int32_t)(k * T::pos_step);
-
-      const float x0c = x_world * if0 + oct0.xo;
-      const int32_t int_x0 = __float2int_rd(x0c);
-      const float frac_x0 = x0c - (float)int_x0;
-      if (!have0 || int_x0 != cur_ix0) {
-        compute_cell(oct0, int_x0, int_y0, int_z0, a000, a100, a010, a110, a001, a101, a011, a111);
-        cur_ix0 = int_x0;
-        have0 = true;
-      }
-      const float fx0 = smoothstep(frac_x0);
-      const float noise0 = interp(shared_grad_dot_table, frac_x0, frac_y0, frac_z0, fx0, fy0, fz0, a000, a100, a010, a110, a001, a101, a011, a111);
-
-      const float x1c = x_world * if1 + oct1.xo;
-      const int32_t int_x1 = __float2int_rd(x1c);
-      const float frac_x1 = x1c - (float)int_x1;
-      if (!have1 || int_x1 != cur_ix1) {
-        compute_cell(oct1, int_x1, int_y1, int_z1, b000, b100, b010, b110, b001, b101, b011, b111);
-        cur_ix1 = int_x1;
-        have1 = true;
-      }
-      const float fx1 = smoothstep(frac_x1);
-      const float noise1 = interp(shared_grad_dot_table, frac_x1, frac_y1, frac_z1, fx1, fy1, fz1, b000, b100, b010, b110, b001, b101, b011, b111);
-
-      float val = 0;
-      val += noise0 * vf0;
-      val += noise1 * vf1;
-
-      local_count += (val < T::noise_threshold) ? 1u : 0u;
-    }
-
-    const uint32_t total = warp_reduce_add(local_count);
-    if (lane == 0 && total >= T::min_count) {
-      uint32_t result_index = atomicAdd(outputs.len, 1);
-      if (result_index < outputs.max_len){
-        outputs.data[result_index] = {seed_index, input.x, input.z};
-      }
-    }
-    __syncwarp();
+  __device__ inline float interp(const GradDotTable &table,
+    float frac_x, float frac_y, float frac_z,
+    float fx, float fy, float fz,
+    uint8_t c000, uint8_t c100, uint8_t c010, uint8_t c110,
+    uint8_t c001, uint8_t c101, uint8_t c011, uint8_t c111)
+  {
+    float n000 = gradDot(table, c000, frac_x, frac_y, frac_z);
+    float n100 = gradDot(table, c100, frac_x - 1.0f, frac_y, frac_z);
+    float n010 = gradDot(table, c010, frac_x, frac_y - 1.0f, frac_z);
+    float n110 = gradDot(table, c110, frac_x - 1.0f, frac_y - 1.0f, frac_z);
+    float n001 = gradDot(table, c001, frac_x, frac_y, frac_z - 1.0f);
+    float n101 = gradDot(table, c101, frac_x - 1.0f, frac_y, frac_z - 1.0f);
+    float n011 = gradDot(table, c011, frac_x, frac_y - 1.0f, frac_z - 1.0f);
+    float n111 = gradDot(table, c111, frac_x - 1.0f, frac_y - 1.0f, frac_z - 1.0f);
+    return lerp3(fx, fy, fz, n000, n100, n010, n110, n001, n101, n011, n111);
   }
-}
 
-void run(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs, KernelSeed1::Result *results, cudaStream_t stream) {
-  kernel<<<32 * 256, threads_per_block, 0, stream>>>(inputs, outputs, results);
-  TRY_CUDA(cudaGetLastError());
-}
+  __global__ __launch_bounds__(threads_per_block) void kernel(
+    InputBuffer<SeedPos> inputs,
+    OutputBuffer<SeedPos> outputs,
+    KernelSeed1::Result *results)
+  {
+    __shared__ GradDotTable shared_grad_dot_table;
+    __shared__ ImprovedNoise s_oct0[warps_per_block];
+    __shared__ ImprovedNoise s_oct1[warps_per_block];
+
+    for (uint32_t i = threadIdx.x; i < sizeof(shared_grad_dot_table) / sizeof(uint32_t); i += threads_per_block) {
+        reinterpret_cast<uint32_t *>(&shared_grad_dot_table)[i] = reinterpret_cast<uint32_t *>(&device_grad_dot_table)[i];
+    }
+    __syncthreads();
+
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warp_global = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const uint32_t num_warps = (gridDim.x * blockDim.x) >> 5;
+
+    ImprovedNoise &oct0 = s_oct0[warp_in_block];
+    ImprovedNoise &oct1 = s_oct1[warp_in_block];
+
+    const uint32_t z_index = lane >> 1;
+    const uint32_t x_start = (lane & 1u) * 8u;
+    constexpr uint32_t words = sizeof(ImprovedNoise) / sizeof(uint32_t);
+
+    uint32_t inputs_len = *inputs.len;
+    for (uint32_t input_index = warp_global; input_index < inputs_len; input_index += num_warps) {
+      const SeedPos input = inputs.data[input_index];
+      const uint32_t seed_index = input.seed_index;
+
+      {
+        const uint32_t *src0 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_0B);
+        const uint32_t *src1 = reinterpret_cast<const uint32_t *>(&results[seed_index].continentalness_1B);
+        uint32_t *dst0 = reinterpret_cast<uint32_t *>(&oct0);
+        uint32_t *dst1 = reinterpret_cast<uint32_t *>(&oct1);
+        for (uint32_t i = lane; i < words; i += 32) {
+          dst0[i] = src0[i];
+          dst1[i] = src1[i];
+        }
+      }
+      __syncwarp();
+
+      const int32_t z_world = input.z + (int32_t)(z_index * T::pos_step) + T::pos_offset;
+      const int32_t x_base   = input.x + (int32_t)(x_start * T::pos_step) + T::pos_offset;
+
+      const float y0 = oct0.yo;
+      const int32_t int_y0 = __float2int_rd(y0);
+      const float frac_y0 = y0 - (float)int_y0;
+      const float fy0 = smoothstep(frac_y0);
+
+      const float z0c = z_world * if0 + oct0.zo;
+      const int32_t int_z0 = __float2int_rd(z0c);
+      const float frac_z0 = z0c - (float)int_z0;
+      const float fz0 = smoothstep(frac_z0);
+
+      int32_t cur_ix0 = 0;
+      bool have0 = false;
+      uint8_t a000, a100, a010, a110, a001, a101, a011, a111;
+
+      float noise0_vals[8];
+      uint32_t prefilter_count = 0;
+
+      #pragma unroll
+      for (uint32_t k = 0; k < 8; k++) {
+        const int32_t x_world = x_base + (int32_t)(k * T::pos_step);
+        const float x0c = x_world * if0 + oct0.xo;
+        const int32_t int_x0 = __float2int_rd(x0c);
+        const float frac_x0 = x0c - (float)int_x0;
+
+        if (!have0 || int_x0 != cur_ix0) {
+          compute_cell(oct0, int_x0, int_y0, int_z0,
+                        a000, a100, a010, a110, a001, a101, a011, a111);
+          cur_ix0 = int_x0;
+          have0 = true;
+        }
+        const float fx0 = smoothstep(frac_x0);
+        const float noise0 = interp(shared_grad_dot_table,
+                                    frac_x0, frac_y0, frac_z0,
+                                    fx0, fy0, fz0,
+                                    a000, a100, a010, a110,
+                                    a001, a101, a011, a111);
+        noise0_vals[k] = noise0 * vf0;
+        prefilter_count += (noise0_vals[k] < kPrefilterThreshold) ? 1u : 0u;
+      }
+
+      uint32_t prefilter_total = warp_reduce_add(prefilter_count);
+
+      if (prefilter_total >= T::min_count) {
+        const float y1 = oct1.yo;
+        const int32_t int_y1 = __float2int_rd(y1);
+        const float frac_y1 = y1 - (float)int_y1;
+        const float fy1 = smoothstep(frac_y1);
+
+        const float z1c = z_world * if1 + oct1.zo;
+        const int32_t int_z1 = __float2int_rd(z1c);
+        const float frac_z1 = z1c - (float)int_z1;
+        const float fz1 = smoothstep(frac_z1);
+
+        int32_t cur_ix1 = 0;
+        bool have1 = false;
+        uint8_t b000, b100, b010, b110, b001, b101, b011, b111;
+
+        uint32_t local_count = 0;
+
+        #pragma unroll
+        for (uint32_t k = 0; k < 8; k++) {
+          const int32_t x_world = x_base + (int32_t)(k * T::pos_step);
+          const float x1c = x_world * if1 + oct1.xo;
+          const int32_t int_x1 = __float2int_rd(x1c);
+          const float frac_x1 = x1c - (float)int_x1;
+
+          if (!have1 || int_x1 != cur_ix1) {
+            compute_cell(oct1, int_x1, int_y1, int_z1,
+                          b000, b100, b010, b110, b001, b101, b011, b111);
+            cur_ix1 = int_x1;
+            have1 = true;
+          }
+          const float fx1 = smoothstep(frac_x1);
+          const float noise1 = interp(shared_grad_dot_table,
+                                      frac_x1, frac_y1, frac_z1,
+                                      fx1, fy1, fz1,
+                                      b000, b100, b010, b110,
+                                      b001, b101, b011, b111);
+          float val = noise0_vals[k] + noise1 * vf1;
+          local_count += (val < kFinalThreshold) ? 1u : 0u;
+        }
+
+        const uint32_t total = warp_reduce_add(local_count);
+        if (lane == 0 && total >= T::min_count) {
+          uint32_t result_index = atomicAdd(outputs.len, 1);
+          if (result_index < outputs.max_len) {
+              outputs.data[result_index] = {seed_index, input.x, input.z};
+          }
+        }
+      }
+      __syncwarp();
+    }
+  }
+
+  void run(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs,
+    KernelSeed1::Result *results, cudaStream_t stream) {
+    kernel<<<32 * 256, threads_per_block, 0, stream>>>(inputs, outputs, results);
+    TRY_CUDA(cudaGetLastError());
+  }
 } // namespace KernelFilter2_0B
 
 struct CudaEventWrapper {

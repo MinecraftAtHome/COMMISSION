@@ -1,0 +1,91 @@
+Using ARCH = sm_89
+nvcc src/client.cpp src/cpu.cpp src/main.cpp src/server.cpp src/cubiomes.c src/gpu.cu cubiomes/biomenoise.c cubiomes/biomes.c cubiomes/finders.c cubiomes/generator.c cubiomes/layers.c cubiomes/noise.c -o main.exe -Xptxas -v -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=0 -DOMISSION_UNBOUND=1 -DPRINT_INTERVAL=512 --expt-relaxed-constexpr --default-stream per-thread -arch=sm_89 -use_fast_math -D_WIN32_WINNT=0x0601
+client.cpp
+cpu.cpp
+main.cpp
+server.cpp
+cubiomes.c
+ptxas info    : 11776 bytes gmem, 56 bytes cmem[4]
+ptxas info    : Compiling entry function '_ZN16KernelFilter2_0B6kernelE11InputBufferI7SeedPosE12OutputBufferIS1_EPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN16KernelFilter2_0B6kernelE11InputBufferI7SeedPosE12OutputBufferIS1_EPN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 4544 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN16KernelFilter2_0A6kernelE11InputBufferI7SeedPosE12OutputBufferIS1_EPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN16KernelFilter2_0A6kernelE11InputBufferI7SeedPosE12OutputBufferIS1_EPN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 4544 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN13KernelFilter26kernelINS_8TemplateILin10500ELy18ELj10240ELj16384ELj1540ELb0ELb0ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN13KernelFilter26kernelINS_8TemplateILin10500ELy18ELj10240ELj16384ELj1540ELb0ELb0ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE
+    136 bytes stack frame, 152 bytes spill stores, 152 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 136 bytes cumulative stack size, 196 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN13KernelFilter26kernelINS_8TemplateILin10500ELy16ELj10240ELj4096ELj340ELb0ELb0ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN13KernelFilter26kernelINS_8TemplateILin10500ELy16ELj10240ELj4096ELj340ELb0ELb0ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE
+    16 bytes stack frame, 24 bytes spill stores, 20 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 16 bytes cumulative stack size, 196 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN13KernelFilter26kernelINS_8TemplateILin10500ELy14ELj8192ELj1024ELj110ELb0ELb1ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN13KernelFilter26kernelINS_8TemplateILin10500ELy14ELj8192ELj1024ELj110ELb0ELb1ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 108 registers, used 1 barriers, 204 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN13KernelFilter26kernelINS_8TemplateILin10500ELy12ELj8192ELj256ELj24ELb0ELb1ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN13KernelFilter26kernelINS_8TemplateILin10500ELy12ELj8192ELj256ELj24ELb0ELb1ELb0EEEEEv11InputBufferI7SeedPosE12OutputBufferIS4_EPN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 204 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN13KernelFilter16kernelE11InputBufferIyE12OutputBufferI7SeedPosEPN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN13KernelFilter16kernelE11InputBufferIyE12OutputBufferI7SeedPosEPN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 192 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN21KernelFilterGradVecs26kernelE11InputBufferI7SeedPosE12OutputBufferIS1_EPKN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN21KernelFilterGradVecs26kernelE11InputBufferI7SeedPosE12OutputBufferIS1_EPKN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 1 barriers, 29504 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN21KernelFilterGradVecs16kernelE11InputBufferIyE12OutputBufferI7SeedPosEPKN11KernelSeed16ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN21KernelFilterGradVecs16kernelE11InputBufferIyE12OutputBufferI7SeedPosEPKN11KernelSeed16ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 78 registers, used 1 barriers, 30000 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN11KernelSeed111late_kernelILj4EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj' for 'sm_89'
+ptxas info    : Function properties for _ZN11KernelSeed111late_kernelILj4EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 78 registers, used 0 barriers, 8704 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN11KernelSeed111late_kernelILj3EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj' for 'sm_89'
+ptxas info    : Function properties for _ZN11KernelSeed111late_kernelILj3EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 78 registers, used 0 barriers, 8704 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN11KernelSeed111late_kernelILj2EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj' for 'sm_89'
+ptxas info    : Function properties for _ZN11KernelSeed111late_kernelILj2EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 78 registers, used 0 barriers, 8704 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN11KernelSeed111late_kernelILj1EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj' for 'sm_89'
+ptxas info    : Function properties for _ZN11KernelSeed111late_kernelILj1EEEv11InputBufferIyES1_I7SeedPosEPNS_6ResultEPj
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 78 registers, used 0 barriers, 8704 bytes smem, 400 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN11KernelSeed16kernelE11InputBufferIyEPNS_6ResultE' for 'sm_89'
+ptxas info    : Function properties for _ZN11KernelSeed16kernelE11InputBufferIyEPNS_6ResultE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 46 registers, used 1 barriers, 8704 bytes smem, 376 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+ptxas info    : Compiling entry function '_ZN17KernelFilterSeeds6kernelEy12OutputBufferIyE' for 'sm_89'
+ptxas info    : Function properties for _ZN17KernelFilterSeeds6kernelEy12OutputBufferIyE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 23 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compile time = 0.000 ms
+gpu.cu
+tmpxft_0000672c_00000000-10_gpu.cudafe1.cpp
+biomenoise.c
+biomes.c
+finders.c
+generator.c
+layers.c
+noise.c
