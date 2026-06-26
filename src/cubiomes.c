@@ -29,7 +29,12 @@ void cubiomes_apply_seed(Cubiomes *cubiomes, uint64_t seed) {
 }
 
 static int eval(Generator *g, int scale, int x, int y, int z, void *data) {
-    return sampleBiomeNoise(&g->bn, NULL, x, y, z, NULL, 0) == mushroom_fields;
+    double px = x, pz = z;
+    px += sampleDoublePerlin(&g->bn.climate[NP_SHIFT], x, 0, z) * 4.0;
+    pz += sampleDoublePerlin(&g->bn.climate[NP_SHIFT], x, z, 0) * 4.0;
+
+    double c = sampleDoublePerlin(&g->bn.climate[NP_CONTINENTALNESS], px, 0, pz);
+    return c < -1.05f;
 }
 
 static Range make_range(int32_t x, int32_t z, int32_t range, int32_t scale) {
