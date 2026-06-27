@@ -61,15 +61,19 @@ template<typename T>
 struct Thread {
 private:
     std::atomic_bool stop_flag;
+    std::atomic_bool done_flag;
     std::thread thread;
 
 protected:
-    Thread() : stop_flag(false), thread() {
+    Thread() : stop_flag(false), done_flag(false), thread() {
 
     }
 
     void start() {
-        thread = std::thread(&T::run, (T*)this);
+        thread = std::thread([this]() {
+            static_cast<T*>(this)->run();
+            done_flag.store(true, std::memory_order_release);
+        });
     }
 
     bool should_stop() {
@@ -82,6 +86,10 @@ public:
     }
 
     void join() {
-        thread.join();
+        if (thread.joinable()) thread.join();
+    }
+
+    bool is_done() const {
+        return done_flag.load(std::memory_order_acquire);
     }
 };
