@@ -377,10 +377,13 @@ __device__ float octave_yo_mod1(const XrsrRandomFork &noise_yo_fork) {
   return ((r >> 32) & 0xFFFFFF) * 5.9604645E-8f;
 }
 
-__global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed, OutputBuffer<uint64_t> outputs) {
+__global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed, uint32_t count, OutputBuffer<uint64_t> outputs) {
   constexpr float maxScore = 0.038f; // 0.045f, 0.035f, 0.03f, 0.025f  ==  1 in 2700, 9400, 26000, 54000
 
   uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= count) {
+    return;
+  }
   uint64_t seed = start_seed + index;
 
   const auto seed_fork = XrsrRandom_seed_fork(seed);
@@ -432,9 +435,12 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   outputs.data[result_index] = seed;
 }
 
-void run(uint64_t start_seed, OutputBuffer<uint64_t> outputs, cudaStream_t stream) {
-  kernel<<<threads_per_run / threads_per_block, threads_per_block, 0, stream>>>(start_seed, outputs);
-  TRY_CUDA(cudaGetLastError());
+void run(uint64_t start_seed, uint32_t count, OutputBuffer<uint64_t> outputs, cudaStream_t stream) {
+  uint32_t blocks = (count + threads_per_block - 1) / threads_per_block;
+  if (blocks > 0) {
+    kernel<<<blocks, threads_per_block, 0, stream>>>(start_seed, count, outputs);
+    TRY_CUDA(cudaGetLastError());
+  }
 }
 } // namespace KernelFilterSeeds
 
@@ -1686,7 +1692,7 @@ void GpuThread::run() {
   BufferLens *device_buffer_lens;
   TRY_CUDA(cudaMalloc(&device_buffer_lens, sizeof(*device_buffer_lens)));
 
-  std::printf("Running device %d\n", device);
+  std::printf("Running device %d\n\n", device);
 
   DeviceBuffer buffer_seeds(sizeof(uint64_t) * KernelSeed1::threads_per_run);
   DeviceBuffer buffer_results(sizeof(KernelSeed1::Result) * KernelSeed1::threads_per_run);
@@ -1760,14 +1766,23 @@ void GpuThread::run() {
 
   auto start = std::chrono::steady_clock::now();
 
-  for (uint32_t i = 0; !should_stop(); i++) {
+  for (uint32_t i = 0; !should_stop(); i++) { // :P simpleased here o/
     uint64_t start_seed = input.next(KernelFilterSeeds::threads_per_run);
+
+    if (input.stop_seed.has_value() && start_seed >= input.stop_seed.value()) {
+        break;
+    }
+
+    uint32_t current_count = KernelFilterSeeds::threads_per_run;
+    if (input.stop_seed.has_value() && start_seed + current_count > input.stop_seed.value()) {
+        current_count = input.stop_seed.value() - start_seed;
+    }
 
     TRY_CUDA(cudaMemsetAsync(device_buffer_lens, 0, sizeof(*device_buffer_lens), stream));
 
     event_start.record(stream);
 
-    KernelFilterSeeds::run(start_seed, outputs_filter_seeds, stream);
+    KernelFilterSeeds::run(start_seed, current_count, outputs_filter_seeds, stream);
     stage_filter_seeds.record(stream);
 
     KernelSeed1::kernel<<<KernelSeed1::threads_per_run / KernelSeed1::threads_per_block, KernelSeed1::threads_per_block, 0, stream>>>(outputs_filter_seeds, results);
