@@ -1,7 +1,7 @@
 #include <cstdint>
 
 #ifndef HOST_DEVICE
-#ifdef __CUDA_ARCH__
+#if defined(__CUDACC__) || defined(__HIP__)
 #define HOST_DEVICE __host__ __device__
 #else
 #define HOST_DEVICE
