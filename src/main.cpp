@@ -1,6 +1,9 @@
 #include "common.h"
+#include "shroomposter.h"
+
 #ifndef NO_GPU
 #include "gpu.h"
+#include "config.h"
 #endif
 #ifndef NO_CPU
 #include "cpu.h"
@@ -178,10 +181,58 @@ int main_inner(int argc, char **argv) {
         return 1;
     }
 
-    const int threads = args.threads.value_or(args.client ? 0 : 1);
-    int32_t min_size = args.min_size.value_or(10'000'000 * (large_biomes ? 16 : 1));
+    std::FILE *output_file = nullptr;
+    std::FILE *latest_file = nullptr;
+
+    const int threads = args.threads.value_or(
+        args.client ? 0 : (int)cfg("default_threads", 16)
+    );
+    int32_t default_size =
+    large_biomes
+        ? (unbound
+            ? (int32_t)cfg("ULB_sizethreshold", 128000000)
+            : (int32_t)cfg("LB_sizethreshold", 96000000))
+        : (unbound
+            ? (int32_t)cfg("USB_sizethreshold", 10000000)
+            : (int32_t)cfg("SB_sizethreshold", 10000000));
+
+    int32_t min_size = args.min_size.value_or(default_size);
+
     if (threads != 0) {
-        std::printf("min_size = %" PRIi32 "\n", min_size);
+
+        std::string default_output;
+
+        if (large_biomes) {
+            if (unbound)
+                default_output = "output/all/ULB.txt";
+            else
+                default_output = "output/all/LB.txt";
+        } else {
+            if (unbound)
+                default_output = "output/all/USB.txt";
+            else
+                default_output = "output/all/SB.txt";
+        }
+
+        const char *output_file_path =
+            args.output_file
+                ? args.output_file.value().c_str()
+                : default_output.c_str();
+
+        output_file = std::fopen(output_file_path, "a");
+        if (!output_file) {
+            std::fprintf(stderr, "Could not open %s\n", output_file_path);
+            return 1;
+        }
+
+        latest_file = std::fopen("latest_output.txt", "w");
+        if (!latest_file) {
+            std::fprintf(stderr, "Could not open latest_output.txt\n");
+            return 1;
+        }
+
+        std::fprintf(output_file, "\n");
+        std::fflush(output_file);
     }
 
     if (no_gpu && args.devices.size() != 0) {
@@ -197,19 +248,19 @@ int main_inner(int argc, char **argv) {
         return 1;
     }
 
-    std::printf("Hello! large_biomes = %s\nunbound: %s\nprint interval: %d\n", large_biomes ? "true" : "false", unbound ? "true" : "false", PRINT_INTERVAL);
-
-    std::FILE *output_file = nullptr;
-    if (threads != 0) {
-        const char *output_file_path = args.output_file ? args.output_file.value().c_str() : "output.txt";
-        output_file = std::fopen(output_file_path, "a");
-        if (output_file == nullptr) {
-            std::fprintf(stderr, "Could not open %s\n", output_file_path);
-            return 1;
-        }
-        std::fprintf(output_file, "\n");
-        std::fflush(output_file);
-    }
+    std::printf(
+    "Hello! :3\n"
+    "version = %s\n"
+    "large_biomes = %s\n"
+    "unbound = %s\n"
+    "print interval = %lld\n"
+    "min_size = %" PRIi32 "\n",
+    version.c_str(),
+    large_biomes ? "true" : "false",
+    unbound ? "true" : "false",
+    cfg("default_print_interval", 256),
+    min_size
+    );
 
     GpuOutputs gpu_outputs;
     CpuOutputs cpu_outputs;
@@ -250,9 +301,25 @@ int main_inner(int argc, char **argv) {
             while (!cpu_outputs.queue.empty()) {
                 auto output = cpu_outputs.queue.front();
                 cpu_outputs.queue.pop();
+
+                shroomposter_submit(
+                    output.seed,
+                    output.x,
+                    output.z,
+                    output.score
+                );
                 std::printf("%" PRIi64 " at %" PRIi32 " %" PRIi32 " with %" PRIi32 "\n", output.seed, output.x, output.z, output.score);
-                std::fprintf(output_file, "%" PRIi64 " %" PRIi32 " %" PRIi32 " %" PRIi32 "\n", output.seed, output.x, output.z, output.score);
-                std::fflush(output_file);
+                if (output_file) {
+                    std::fprintf(output_file, "%" PRIi64 " %" PRIi32 " %" PRIi32 " %" PRIi32 "\n", output.seed, output.x, output.z, output.score);
+                    std::fflush(output_file);
+                }
+                if (latest_file) {
+                    std::rewind(latest_file);
+                    std::fprintf(latest_file,
+                        "%" PRIi64 " %" PRIi32 " %" PRIi32 " %" PRIi32 "\n",
+                        output.seed, output.x, output.z, output.score);
+                    std::fflush(latest_file);
+                }
             }
         }
 
@@ -302,18 +369,23 @@ int main_inner(int argc, char **argv) {
     }
 #endif
 
-    if (output_file != nullptr) {
-        std::fclose(output_file);
+    if (output_file) {
+    std::fclose(output_file);
     }
 
-    return 0;
+    if (latest_file) {
+        std::fclose(latest_file);
+    }
 }
 
 int main(int argc, char **argv) {
     try {
+        loadConfig();
+        shroomposter_start();
         return main_inner(argc, argv);
     } catch (std::exception &e) {
         std::fprintf(stderr, "Uncaught exception in main: %s\n", e.what());
+        shroomposter_stop();
         std::abort();
     }
 }
