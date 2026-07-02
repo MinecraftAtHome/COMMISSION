@@ -229,12 +229,14 @@ int main_inner(int argc, char **argv) {
 
 #ifndef NO_GPU
     uint64_t start_seed = args.start_seed.value_or(random_start_seed());
-    std::printf("Starting from %" PRIi64 "\n", start_seed);
     SeedIterator seed_range(start_seed);
 
     std::vector<std::unique_ptr<GpuThread>> gpu_threads;
     for (int device : args.devices) {
         gpu_threads.emplace_back(std::make_unique<GpuThread>(device, std::ref(seed_range), std::ref(gpu_outputs)));
+    }
+    if (!gpu_threads.empty()) {
+        std::printf("Starting from %" PRIi64 "\n", start_seed);
     }
 #endif
 
@@ -317,13 +319,15 @@ int main_inner(int argc, char **argv) {
 #endif
 
 #ifndef NO_GPU
-    std::printf("Waiting for GPU batches to finish...\n");
-    for (auto &thread : gpu_threads) {
-        (*thread).join();
-    }
-    {
-        uint64_t total_seeds_checked = seed_range.pos.load(std::memory_order_relaxed) - start_seed;
-        std::printf("Start seed: %" PRIi64 ", Total seeds checked: %" PRIu64 "\n", start_seed, total_seeds_checked);
+    if (!gpu_threads.empty()) {
+        std::printf("Waiting for GPU batches to finish...\n");
+        for (auto &thread : gpu_threads) {
+            (*thread).join();
+        }
+        {
+            uint64_t total_seeds_checked = seed_range.pos.load(std::memory_order_relaxed) - start_seed;
+            std::printf("Start seed: %" PRIi64 ", Total seeds checked: %" PRIu64 "\n", start_seed, total_seeds_checked);
+        }
     }
 #endif
 #ifndef NO_CPU
