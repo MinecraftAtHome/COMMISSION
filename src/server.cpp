@@ -128,6 +128,7 @@ void ServerThread::run() {
 
     try {
         asio::io_context io_context;
+        io_ctx.store(&io_context, std::memory_order_release);
 
         asio::ip::tcp::resolver resolver(io_context);
         auto endpoints = resolver.resolve(listen_address.host, listen_address.service);
@@ -140,8 +141,16 @@ void ServerThread::run() {
         tcp_server server(io_context, endpoint, outputs);
 
         io_context.run();
+
+        io_ctx.store(nullptr, std::memory_order_release);
     } catch (std::exception &e) {
         std::fprintf(stderr, "Uncaught exception on server thread: %s\n", e.what());
         std::abort();
     }
+}
+
+void ServerThread::shutdown() {
+    stop();
+    auto *ctx = io_ctx.load(std::memory_order_acquire);
+    if (ctx) ctx->stop();
 }
