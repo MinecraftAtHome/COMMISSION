@@ -1861,31 +1861,47 @@ void GpuThread::run() {
       std::printf("\n");
       std::printf("start_seed = %" PRIi64 "\n", start_seed);
 
+      uint64_t total_inputs = stage_filter_seeds.total_inputs * stage_filter_seeds.inputs_multiplier;
+      uint64_t total_outputs = filter_2.back().stage.total_outputs;
+
+      // Find max input value for dynamic column width
+      uint64_t max_inputs = total_inputs;
+      uint64_t gradvecs_1_inputs = stage_filter_gradvecs_1.total_inputs * stage_filter_gradvecs_1.inputs_multiplier;
+      if (gradvecs_1_inputs > max_inputs) max_inputs = gradvecs_1_inputs;
+      int inputs_width = std::max(12, (int)std::snprintf(nullptr, 0, "%" PRIu64, max_inputs));
+      int outputs_width = 12;
+
+      // Find max time value for dynamic time column width
+      double max_time_ms = host_total_time * 1e3;
+      for (auto &stage : stage_stats) {
+        double stage_time_ms = stage.total_time * 1e3;
+        if (stage_time_ms > max_time_ms) max_time_ms = stage_time_ms;
+      }
+      int time_width = std::max(9, (int)std::snprintf(nullptr, 0, "%.3f", max_time_ms));
+
       double kernel_total_time = 0;
       for (auto &stage : stage_stats) {
         uint64_t scaled_total_inputs = stage.total_inputs * stage.inputs_multiplier;
         auto [scaled_input_speed, input_speed_unit] = scale_si(scaled_total_inputs / stage.total_time);
         auto [scaled_output_speed, output_speed_unit] = scale_si(stage.total_outputs / stage.total_time);
-        std::printf("%-20s - %9.3f ms | %7.3f %% | %12" PRIu64 " -> %12" PRIu64
+        std::printf("%-20s - %*.3f ms | %7.3f %% | %*" PRIu64 " -> %*" PRIu64
                     " | 1 in %11.3f | %7.3f %cips | %7.3f %cops\n",
-                    stage.name.c_str(), stage.total_time * 1e3,
+                    stage.name.c_str(), time_width, stage.total_time * 1e3,
                     stage.total_time / host_total_time * 100.0,
-                    scaled_total_inputs, stage.total_outputs,
+                    inputs_width, scaled_total_inputs, outputs_width, stage.total_outputs,
                     (double)scaled_total_inputs / stage.total_outputs,
                     scaled_input_speed, input_speed_unit, scaled_output_speed,
                     output_speed_unit);
         kernel_total_time += stage.total_time;
       }
 
-      uint64_t total_inputs = stage_filter_seeds.total_inputs * stage_filter_seeds.inputs_multiplier;
-      uint64_t total_outputs = filter_2.back().stage.total_outputs;
       auto [scaled_input_speed, input_speed_unit] = scale_si(total_inputs / host_total_time);
       auto [scaled_output_speed, output_speed_unit] = scale_si(total_outputs / host_total_time);
       std::printf(
-          "total                - %9.3f ms | %7.3f %% | %12" PRIu64
-          " -> %12" PRIu64 " |                  | %7.3f %cips | %7.3f %cops\n",
-          host_total_time * 1e3, kernel_total_time / host_total_time * 100.0,
-          total_inputs, total_outputs, scaled_input_speed, input_speed_unit,
+          "%-20s - %*.3f ms | %7.3f %% | %*" PRIu64
+          " -> %*" PRIu64 " |                  | %7.3f %cips | %7.3f %cops\n",
+          "total", time_width, host_total_time * 1e3, kernel_total_time / host_total_time * 100.0,
+          inputs_width, total_inputs, outputs_width, total_outputs, scaled_input_speed, input_speed_unit,
           scaled_output_speed, output_speed_unit);
 
       size_t gpu_outputs_size;

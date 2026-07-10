@@ -41,11 +41,12 @@ void CpuThread::run() {
 
     Cubiomes *cubiomes = cubiomes_create(large_biomes);
 
-    while (!should_stop()) {
+    while (true) {
         GpuOutput input;
         {
             std::unique_lock lock(inputs.mutex);
             if (inputs.queue.empty()) {
+                if (should_stop()) break;
                 lock.unlock();
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 continue;
