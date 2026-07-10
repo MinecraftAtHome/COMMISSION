@@ -1,7 +1,4 @@
-*.o
-*.a
-main
-main.exe
 main-sb*
 main-lb*
 output.txt
+build
