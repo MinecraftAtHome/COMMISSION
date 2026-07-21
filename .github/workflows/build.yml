@@ -6,35 +6,69 @@ on:
 
 jobs:
   linux_cuda:
-    name: cuda/release/linux
-    runs-on: ubuntu-latest
-    container: nvidia/cuda:12.9.1-devel-ubuntu22.04
-    env:
-      DEBIAN_FRONTEND: noninteractive
-      TZ: Etc/UTC
-    strategy:
-      matrix:
-        biomes: [0, 1]
-    steps:
-      - name: Install build tools
-        run: |
-          apt-get update
-          apt-get install -y build-essential g++-11
-      - uses: actions/checkout@v7
-      - name: Build (Linux, LARGE_BIOMES=${{ matrix.biomes }})
-        run: |
-          make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89 CC=gcc-11 CXX=g++-11
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ github.event.repository.name }}.${{ github.run_id }}.linux_x86.biomes${{ matrix.biomes }}
-          path: ./main
+      name: cuda/release/linux
+      runs-on: ubuntu-latest
+      container: nvidia/cuda:12.9.1-devel-ubuntu22.04
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        TZ: Etc/UTC
+      strategy:
+        matrix:
+          variants: [0, 1, 2, 3]
+          include:
+            - variants: 0
+              biome_name: "small_biomes"
+              large_biomes: 0
+              unbound: 0
+            - variants: 1
+              biome_name: "small_biomes"
+              large_biomes: 0
+              unbound: 1
+            - variants: 2
+              biome_name: "large_biomes"
+              large_biomes: 1
+              unbound: 0
+            - variants: 3
+              biome_name: "large_biomes"
+              large_biomes: 1
+              unbound: 1
+      steps:
+        - name: Install build tools
+          run: |
+            apt-get update
+            apt-get install -y build-essential g++-11
+        - uses: actions/checkout@v7
+        - name: Build (Linux, biomes:${{ matrix.biomes }}, unbound:${{matrix.unbound}})
+          run: |
+            make LARGE_BIOMES=${{ matrix.large_biomes }} UNBOUND=${{matrix.unbound}} ARCH=all CC=gcc-11 CXX=g++-11
+        - uses: actions/upload-artifact@v7
+          with:
+            name: ${{ github.event.repository.name }}.${{ github.run_id }}.linux_x86.${{ matrix.biome_name }}
+            path: ./main-*
   
   windows_cuda:
     name: cuda/release/windows
     runs-on: windows-2022
     strategy:
       matrix:
-        biomes: [0, 1]
+        variants: [0, 1, 2, 3]
+        include:
+          - variants: 0
+            biome_name: "small_biomes"
+            large_biomes: 0
+            unbound: 0
+          - variants: 1
+            biome_name: "small_biomes"
+            large_biomes: 0
+            unbound: 1
+          - variants: 2
+            biome_name: "large_biomes"
+            large_biomes: 1
+            unbound: 0
+          - variants: 3
+            biome_name: "large_biomes"
+            large_biomes: 1
+            unbound: 1
     steps:
       - uses: actions/checkout@v7
       - uses: ilammy/msvc-dev-cmd@v1
@@ -76,11 +110,11 @@ jobs:
           echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build with Makefile (Windows, LARGE_BIOMES=${{ matrix.biomes }})
+      - name: Build with Makefile (Windows, biomes:${{ matrix.biome_name }}, unbound:${{ matrix.unbound }})
         shell: msys2 {0}
         run: |
-          make LARGE_BIOMES=${{ matrix.biomes }} ARCH=sm_89
+          make LARGE_BIOMES=${{ matrix.large_biomes }} UNBOUND=${{matrix.unbound}} ARCH=all
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}.${{ github.run_id }}.windows_x86.biomes${{ matrix.biomes }}
-          path: ./main.exe
+          name: ${{ github.event.repository.name }}.${{ github.run_id }}.windows_x86.${{matrix.biome_name}}
+          path: ./main-*.exe
