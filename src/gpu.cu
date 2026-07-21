@@ -1,5 +1,6 @@
 #include "Random.h"
 #include "gpu.h"
+#include "config.h"
 
 #include <array>
 #include <bit>
@@ -472,8 +473,7 @@ struct Result {
 template <size_t Octaves> struct ResultSampler {
   ImprovedNoise octaves[Octaves];
 
-__device__ float sample_only_a(const GradDotTable &table, int32_t x,
-                                 int32_t y, int32_t z) const {
+  __device__ float sample_only_a(const GradDotTable &table, int32_t x, int32_t y, int32_t z) const {
     float val = 0;
     if constexpr (Octaves >= 1)
       val += sample_octave<chosen_continentalness_config.octaves_a[0]>(table, octaves[0], x, y, z);
@@ -495,8 +495,7 @@ __device__ float sample_only_a(const GradDotTable &table, int32_t x,
       val += sample_octave<chosen_continentalness_config.octaves_a[8]>(table, octaves[16], x, y, z);
     return val;
   }
-__device__ float sample(const GradDotTable &table, int32_t x, int32_t y,
-                          int32_t z) const {
+  __device__ float sample(const GradDotTable &table, int32_t x, int32_t y, int32_t z) const {
     float val = 0;
     if constexpr (Octaves >= 1)
       val += sample_octave<chosen_continentalness_config.octaves_a[0]>(table, octaves[0], x, y, z);
@@ -1854,7 +1853,7 @@ void GpuThread::run() {
       }
     }
 
-    if ((i + 1) % PRINT_INTERVAL == 0) {
+    if ((i + 1) % cfg("default_print_interval", 4096) == 0) {
       auto end = std::chrono::steady_clock::now();
       double host_total_time = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count() * 1e-9;
 
