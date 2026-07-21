@@ -114,7 +114,7 @@ jobs:
       - name: Build with Makefile (Windows, biomes:${{ matrix.biome_name }}, unbound:${{ matrix.unbound }})
         shell: msys2 {0}
         run: |
-          make LARGE_BIOMES=${{ matrix.biomes }} UNBOUND=${{matrix.unbound}} ARCH=all
+          make LARGE_BIOMES=${{ matrix.large_biomes }} UNBOUND=${{matrix.unbound}} ARCH=all
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}.${{ github.run_id }}.windows_x86.${{matrix.biome_name}}
