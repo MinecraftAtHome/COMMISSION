@@ -44,9 +44,9 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
    - Change GPU target for PTX compilation
      - `ARCH=native` is default for GPUs 30 series or older
      - `ARCH=sm_89` is default for GPUs 40 series or newer
- - PRINT_INTERVAL (Warning: This is going to change in 1.4.1 to 256 by default!)
+ - PRINT_INTERVAL
    - Change how often the program prints benchmarking info
-     - Default is 256, meaning every 256iterations of the full GPU pipeline, it will print the table with stats.
+     - Default is 256, meaning every 256 iterations of the full GPU pipeline, it will print the table with stats.
    - Example usage
      `make -B PRINT_INTERVAL=256` (default)
      `make -B PRINT_INTERVAL=4096`
