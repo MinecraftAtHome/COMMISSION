@@ -2,6 +2,17 @@ CUBIOMES_SRC := $(addprefix cubiomes/,biomenoise.c biomes.c finders.c generator.
 
 LARGE_BIOMES ?= 0
 UNBOUND ?= 0
+
+ifeq (UNBOUND, 1)
+	BIN_SUFFIX += u
+endif
+
+ifeq (LARGE_BIOMES, 1)
+	BIN_SUFFIX += lb
+else
+	BIN_SUFFIX += sb
+endif
+
 PRINT_INTERVAL ?= 256
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
@@ -36,7 +47,7 @@ clean:
 
 # nvcc src/*.cpp src/*.c src/*.cu -o main.exe cubiomes/biomenoise.c cubiomes/biomes.c cubiomes/finders.c cubiomes/generator.c cubiomes/layers.c cubiomes/noise.c -arch=native -O3 -std=c++20 -I asio-1.34.2/include -DOMISSION_LARGE_BIOMES=1 --expt-relaxed-constexpr --default-stream per-thread -D_WIN32_WINNT=0x0601
 main.exe: $(SRC) $(CUBIOMES_SRC)
-	nvcc $(SRC) $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
+	nvcc $(SRC) $(CUBIOMES_SRC) -o $@-$(BIN_SUFFIX) $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
 else
 override NVCC_FLAGS += -ccbin $(CXX)
 
@@ -92,5 +103,5 @@ server.o: src/server.cpp src/server.h src/common.h
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
 main: $(MAIN_DEP)
-	$(MAIN_CXX) $(MAIN_SRC) -o $@ $(MAIN_CXXFLAGS)
+	$(MAIN_CXX) $(MAIN_SRC) -o $@-$(BIN_SUFFIX) $(MAIN_CXXFLAGS)
 endif
