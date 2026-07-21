@@ -20,8 +20,12 @@
 #include <charconv>
 #include <algorithm>
 #include <random>
-#include <unistd.h>
 
+#ifdef __linux__
+#include <unistd.h>
+#elif _WIN32
+#include <cstdlib>
+#endif
 static std::atomic_bool running{true};
 static std::atomic_uint32_t signal_count{0};
 
@@ -29,7 +33,11 @@ static void signal_handler(int) {
     uint32_t count = signal_count.fetch_add(1, std::memory_order_relaxed) + 1;
     running.store(false, std::memory_order_relaxed);
     if (count >= 2) {
+#ifdef __linux__
         _exit(130);
+#elif _WIN32
+        std::_Exit(130);
+#endif
     }
 }
 
