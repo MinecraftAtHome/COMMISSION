@@ -45,7 +45,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}.${{ github.run_id }}.linux_x86.${{ matrix.biome_name }}
-          path: ./main
+          path: ./main-*
   
   windows_cuda:
     name: cuda/release/windows
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}.${{ github.run_id }}.windows_x86.${{matrix.biome_name}}
-          path: ./main.exe
+          path: ./main-*.exe
 
   create_release:
     runs-on: ubuntu-latest
