@@ -659,19 +659,17 @@ void run_late(InputBuffer<uint64_t> seeds, InputBuffer<SeedPos> inputs, Result *
 constexpr int32_t large_biomes_pos_mul = large_biomes ? 4 : 1;
 
 #include "kernel_0A.h"
-__device__ float device_kernel_0A[6][6][16][2];
-static_assert(sizeof(host_kernel_0A) == sizeof(device_kernel_0A));
+__device__ float device_kernel_0A[6][6][12][2];
 
 #include "kernel_0B.h"
-__device__ float device_kernel_0B[6][6][16][2];
-static_assert(sizeof(host_kernel_0B) == sizeof(device_kernel_0B));
+__device__ float device_kernel_0B[6][6][12][2];
 
 void init_conv_kernels() {
-  float temp_0A[6][6][16][2];
+  float temp_0A[6][6][12][2];
   for (int dny = 0; dny < 2; ++dny) {
     for (int dnx = 0; dnx < 6; ++dnx) {
       for (int dnz = 0; dnz < 6; ++dnz) {
-        for (int p = 0; p < 16; ++p) {
+        for (int p = 0; p < 12; ++p) {
           temp_0A[dnx][dnz][p][dny] = host_kernel_0A[dny][dnx][dnz][p];
         }
       }
@@ -680,11 +678,11 @@ void init_conv_kernels() {
   void *device_kernel_0A_addr;
   TRY_CUDA(cudaGetSymbolAddress(&device_kernel_0A_addr, device_kernel_0A));
   TRY_CUDA(cudaMemcpy(device_kernel_0A_addr, temp_0A, sizeof(temp_0A), cudaMemcpyHostToDevice));
-  float temp_0B[6][6][16][2];
+  float temp_0B[6][6][12][2];
   for (int dny = 0; dny < 2; ++dny) {
     for (int dnx = 0; dnx < 6; ++dnx) {
       for (int dnz = 0; dnz < 6; ++dnz) {
-        for (int p = 0; p < 16; ++p) {
+        for (int p = 0; p < 12; ++p) {
           temp_0B[dnx][dnz][p][dny] = host_kernel_0B[dny][dnx][dnz][p];
         }
       }
@@ -703,30 +701,30 @@ constexpr float kGradVecs2FinalThreshold      = -20.0f;
 
 template <typename IndexT>
 __device__ __forceinline__ float score_center_2x2(
-    const float conv_z0[513][6],
-    const float conv_z1[513][6],
+    const float conv_z0[6][256],
+    const float conv_z1[6][256],
     const IndexT* idx0,
     const IndexT* idx1)
 {
   return
-      conv_z0[idx0[2]][2] +
-      conv_z0[idx0[3]][3] +
-      conv_z1[idx1[2]][2] +
-      conv_z1[idx1[3]][3];
+      conv_z0[2][idx0[2]] +
+      conv_z0[3][idx0[3]] +
+      conv_z1[2][idx1[2]] +
+      conv_z1[3][idx1[3]];
 }
 
 template <typename IndexT>
 __device__ __forceinline__ float score_full_12(
-    const float conv_z0[513][6],
-    const float conv_z1[513][6],
+    const float conv_z0[6][256],
+    const float conv_z1[6][256],
     const IndexT* idx0,
     const IndexT* idx1)
 {
   float score = 0.0f;
 #pragma unroll
   for (int i = 0; i < 6; ++i) {
-    score += conv_z0[idx0[i]][i];
-    score += conv_z1[idx1[i]][i];
+    score += conv_z0[i][idx0[i]];
+    score += conv_z1[i][idx1[i]];
   }
   return score;
 }
@@ -741,16 +739,16 @@ __launch_bounds__(block_dim_x) void kernel(
     const KernelSeed1::Result* __restrict__ results)
 {
   __shared__ alignas(16) ImprovedNoise oct_0A;
-  __shared__ alignas(16) float shared_kernel_0A[6][6][16][2];
+  __shared__ alignas(16) float shared_kernel_0A[6][6][12][2];
 
-  __shared__ float conv_z0[513][6];
-  __shared__ float conv_z1[513][6];
+  __shared__ float conv_z0[6][256];
+  __shared__ float conv_z1[6][256];
 
   __shared__ alignas(16) uint8_t idx_xy[2][272];
 
   const int32_t nz = threadIdx.x;
 
-  for (uint32_t i = nz; i < 288; i += block_dim_x) {
+  for (uint32_t i = nz; i < sizeof(shared_kernel_0A) / sizeof(uint4); i += block_dim_x) {
     reinterpret_cast<uint4*>(shared_kernel_0A)[i] =
         reinterpret_cast<const uint4*>(device_kernel_0A)[i];
   }
@@ -770,7 +768,11 @@ __launch_bounds__(block_dim_x) void kernel(
       uint32_t p_z[6];
 #pragma unroll
       for (int32_t dnz = 0; dnz < 6; ++dnz) {
-        p_z[dnz] = oct_0A.p[(nz + dnz) & 0xFF] & 0xF;
+        uint32_t p = oct_0A.p[(nz + dnz) & 0xFF] & 0xF;
+        if (p >= 12) {
+          p = (0x0B010900u >> ((p - 12) * 8)) & 0xF;
+        }
+        p_z[dnz] = p;
       }
 
 #pragma unroll
@@ -785,10 +787,8 @@ __launch_bounds__(block_dim_x) void kernel(
           conv1 += shared_kernel_0A[dnx][dnz][p][1];
         }
 
-        conv_z0[nz][dnx] = conv0;
-        conv_z1[nz][dnx] = conv1;
-        conv_z0[nz + 256][dnx] = conv0;
-        conv_z1[nz + 256][dnx] = conv1;
+        conv_z0[dnx][nz] = conv0;
+        conv_z1[dnx][nz] = conv1;
       }
     }
 
@@ -824,13 +824,13 @@ __launch_bounds__(block_dim_x) void kernel(
       uchar4 c1_2 = *reinterpret_cast<const uchar4*>(&idx_xy[1][nx + 8]);
       uchar4 c1_3 = *reinterpret_cast<const uchar4*>(&idx_xy[1][nx + 12]);
 
-      uint16_t w0[13];
+      uint8_t w0[13];
       w0[0]  = c0_0.x + nz; w0[1]  = c0_0.y + nz; w0[2]  = c0_0.z + nz; w0[3]  = c0_0.w + nz;
       w0[4]  = c0_1.x + nz; w0[5]  = c0_1.y + nz; w0[6]  = c0_1.z + nz; w0[7]  = c0_1.w + nz;
       w0[8]  = c0_2.x + nz; w0[9]  = c0_2.y + nz; w0[10] = c0_2.z + nz; w0[11] = c0_2.w + nz;
       w0[12] = c0_3.x + nz;
 
-      uint16_t w1[13];
+      uint8_t w1[13];
       w1[0]  = c1_0.x + nz; w1[1]  = c1_0.y + nz; w1[2]  = c1_0.z + nz; w1[3]  = c1_0.w + nz;
       w1[4]  = c1_1.x + nz; w1[5]  = c1_1.y + nz; w1[6]  = c1_1.z + nz; w1[7]  = c1_1.w + nz;
       w1[8]  = c1_2.x + nz; w1[9]  = c1_2.y + nz; w1[10] = c1_2.z + nz; w1[11] = c1_2.w + nz;
@@ -838,8 +838,8 @@ __launch_bounds__(block_dim_x) void kernel(
 
 #pragma unroll
       for (int candidate = 0; candidate < 8; ++candidate) {
-        const uint16_t* cw0 = &w0[candidate];
-        const uint16_t* cw1 = &w1[candidate];
+        const uint8_t* cw0 = &w0[candidate];
+        const uint8_t* cw1 = &w1[candidate];
 
         const float gate = score_center_2x2(conv_z0, conv_z1, cw0, cw1);
         if (gate >= kGradVecs1PrefilterThreshold) {
@@ -887,12 +887,12 @@ __launch_bounds__(block_dim_x) void kernel(
     const KernelSeed1::Result* __restrict__ results)
 {
   __shared__ alignas(16) ImprovedNoise oct_0B;
-  __shared__ alignas(16) float shared_kernel_0B[6][6][16][2];
+  __shared__ alignas(16) float shared_kernel_0B[6][6][12][2];
 
-  __shared__ float conv_z0[513][6];
-  __shared__ float conv_z1[513][6];
+  __shared__ float conv_z0[6][256];
+  __shared__ float conv_z1[6][256];
 
-  for (uint32_t i = threadIdx.x; i < 288; i += blockDim.x) {
+  for (uint32_t i = threadIdx.x; i < sizeof(shared_kernel_0B) / sizeof(uint4); i += blockDim.x) {
     reinterpret_cast<uint4*>(shared_kernel_0B)[i] =
         reinterpret_cast<const uint4*>(device_kernel_0B)[i];
   }
@@ -918,7 +918,11 @@ __launch_bounds__(block_dim_x) void kernel(
       uint32_t p_z[6];
 #pragma unroll
       for (int32_t dnz = 0; dnz < 6; ++dnz) {
-        p_z[dnz] = oct_0B.p[(V + dnz) & 0xFF] & 0xF;
+        uint32_t p = oct_0B.p[(V + dnz) & 0xFF] & 0xF;
+        if (p >= 12) {
+          p = (0x0B010900u >> ((p - 12) * 8)) & 0xF;
+        }
+        p_z[dnz] = p;
       }
 
 #pragma unroll
@@ -933,10 +937,8 @@ __launch_bounds__(block_dim_x) void kernel(
           conv1 += shared_kernel_0B[dnx][dnz][p][1];
         }
 
-        conv_z0[V][dnx] = conv0;
-        conv_z1[V][dnx] = conv1;
-        conv_z0[V + 256][dnx] = conv0;
-        conv_z1[V + 256][dnx] = conv1;
+        conv_z0[dnx][V] = conv0;
+        conv_z1[dnx][V] = conv1;
       }
     }
 
@@ -966,8 +968,8 @@ __launch_bounds__(block_dim_x) void kernel(
         const int32_t nz = __float2int_rd(z * input_factor_b + oct_0B.zo - 2.0f);
         const int32_t nz_masked = nz & 0xFF;
 
-        int32_t idx0[6];
-        int32_t idx1[6];
+        uint8_t idx0[6];
+        uint8_t idx1[6];
 #pragma unroll
         for (int32_t i = 0; i < 6; ++i) {
           idx0[i] = hoisted_idx_xy[0][i] + nz_masked;
@@ -1715,7 +1717,7 @@ void GpuThread::run() {
   OutputBuffer<SeedPos> outputs_filter_gradvecs_2(buffer_2, &device_buffer_lens->results_len_filter_gradvecs_2);
   auto &stage_filter_gradvecs_2 = stage_stats.emplace_back("filter_gradvecs_2", stage_filter_2_0a.outputs_len, &host_buffer_lens.results_len_filter_gradvecs_2, KernelFilterGradVecs2::threads_per_seed, outputs_filter_gradvecs_2.max_len);
 
-  OutputBuffer<SeedPos> outputs_filter_2_0b(buffer_2, &device_buffer_lens->results_len_filter_2_0b);
+  OutputBuffer<SeedPos> outputs_filter_2_0b(buffer_1, &device_buffer_lens->results_len_filter_2_0b);
   auto &stage_filter_2_0b = stage_stats.emplace_back("filter_2_01b", stage_filter_gradvecs_2.outputs_len, &host_buffer_lens.results_len_filter_2_0b, 1, outputs_filter_2_0b.max_len);
 
   auto &stage_init_seeds_late_1 = stage_stats.emplace_back("init_seeds_late_1", stage_filter_2_0b.outputs_len, stage_filter_2_0b.outputs_len, 1, outputs_filter_2_0b.max_len);
@@ -1744,7 +1746,7 @@ void GpuThread::run() {
   {
     uint32_t *inputs_len = stage_filter_2_0b.outputs_len;
     for (size_t i = 0; i < sizeof(filter_2_runs) / sizeof(*filter_2_runs); i++) {
-      OutputBuffer<SeedPos> outputs(i % 2 == 0 ? buffer_1 : buffer_2, &device_buffer_lens->results_len_filter_2[i]);
+      OutputBuffer<SeedPos> outputs(i % 2 == 0 ? buffer_2 : buffer_1, &device_buffer_lens->results_len_filter_2[i]);
 
       uint32_t *outputs_len = &host_buffer_lens.results_len_filter_2[i];
       auto &stage = stage_stats.emplace_back(std::string("filter_2") + (char)('a' + i), inputs_len, outputs_len, 1, outputs.max_len);
