@@ -5,6 +5,7 @@
 #include <atomic>
 #include <thread>
 #include <array>
+#include <unordered_set>
 
 #ifndef OMISSION_LARGE_BIOMES
 #define OMISSION_LARGE_BIOMES 0
@@ -42,6 +43,20 @@ struct CpuOutput {
     int32_t score;
 };
 
+inline bool operator==(const CpuOutput &a, const CpuOutput &b) {
+    return a.seed == b.seed && a.x == b.x && a.z == b.z && a.score == b.score;
+}
+
+struct CpuOutputHash {
+    size_t operator()(const CpuOutput &output) const {
+        size_t h = std::hash<uint64_t>{}(output.seed);
+        h ^= std::hash<int32_t>{}(output.x) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= std::hash<int32_t>{}(output.z) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= std::hash<int32_t>{}(output.score) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
 struct GpuOutputs {
     std::queue<GpuOutput> queue;
     std::mutex mutex;
@@ -49,6 +64,7 @@ struct GpuOutputs {
 
 struct CpuOutputs {
     std::queue<CpuOutput> queue;
+    std::unordered_set<CpuOutput, CpuOutputHash> seen;
     std::mutex mutex;
 };
 

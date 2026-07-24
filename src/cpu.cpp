@@ -67,7 +67,9 @@ void CpuThread::run() {
 
         {
             std::lock_guard lock(outputs.mutex);
-            outputs.queue.push(output.value());
+            if (outputs.seen.insert(output.value()).second) {
+                outputs.queue.push(output.value());
+            }
         }
     }
 

@@ -1844,6 +1844,15 @@ void GpuThread::run() {
       h_buffer.resize(len);
       TRY_CUDA(cudaMemcpy(h_buffer.data(), final_outputs.data, sizeof(*h_buffer.data()) * len, cudaMemcpyDeviceToHost));
 
+      std::sort(h_buffer.begin(), h_buffer.end(), [](const SeedPos &a, const SeedPos &b) {
+        if (a.seed_index != b.seed_index) return a.seed_index < b.seed_index;
+        if (a.x != b.x) return a.x < b.x;
+        return a.z < b.z;
+      });
+      h_buffer.erase(std::unique(h_buffer.begin(), h_buffer.end(), [](const SeedPos &a, const SeedPos &b) {
+        return a.seed_index == b.seed_index && a.x == b.x && a.z == b.z;
+      }), h_buffer.end());
+
       {
         std::lock_guard lock(outputs.mutex);
         for (const auto &result : h_buffer) {
