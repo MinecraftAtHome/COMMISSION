@@ -1761,7 +1761,11 @@ void GpuThread::run() {
   auto start = std::chrono::steady_clock::now();
 
   for (uint32_t i = 0; !should_stop(); i++) {
-    uint64_t start_seed = input.next(KernelFilterSeeds::threads_per_run);
+    auto seed = input.next(KernelFilterSeeds::threads_per_run);
+    if (!seed) {
+      break;
+    }
+    uint64_t start_seed = *seed;
 
     TRY_CUDA(cudaMemsetAsync(device_buffer_lens, 0, sizeof(*device_buffer_lens), stream));
 
