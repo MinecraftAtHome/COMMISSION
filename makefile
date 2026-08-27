@@ -14,6 +14,7 @@ else
 endif
 
 PRINT_INTERVAL ?= 256
+CPU_ARCH ?=
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
 # - Everything else: use native
@@ -31,6 +32,9 @@ endif
 
 $(info Using ARCH = $(ARCH))
 override CFLAGS += -O3
+ifneq ($(strip $(CPU_ARCH)),)
+  override CFLAGS += -march=$(CPU_ARCH)
+endif
 override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) -DOMISSION_UNBOUND=$(UNBOUND) -DPRINT_INTERVAL=$(PRINT_INTERVAL)
 override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per-thread -arch=$(ARCH) -use_fast_math
 
@@ -105,3 +109,4 @@ server.o: src/server.cpp src/server.h src/common.h
 main: $(MAIN_DEP)
 	$(MAIN_CXX) $(MAIN_SRC) -o $@-$(BIN_SUFFIX) $(MAIN_CXXFLAGS)
 endif
+
