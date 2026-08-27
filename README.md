@@ -44,6 +44,12 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
    - Change GPU target for PTX compilation
      - `ARCH=native` is default for GPUs 30 series or older
      - `ARCH=sm_89` is default for GPUs 40 series or newer
+ - CPU_ARCH
+   - Optional CPU architecture tuning for the GCC/Clang build path. The default
+     remains portable; use `CPU_ARCH=native` when the binary will run only on
+     the machine that builds it.
+   - Example usage
+     `make -B CPU_ARCH=native`
  - PRINT_INTERVAL
    - Change how often the program prints benchmarking info
      - Default is 256, meaning every 256 iterations of the full GPU pipeline, it will print the table with stats.
@@ -60,3 +66,4 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
    - Example usage
      `make -B LARGE_BIOMES=1` for large biomes
      `make -B LARGE_BIOMES=0` for small biomes (default)
+
