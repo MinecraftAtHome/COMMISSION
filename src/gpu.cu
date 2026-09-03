@@ -703,30 +703,30 @@ constexpr float kGradVecs2FinalThreshold      = -20.0f;
 
 template <typename IndexT>
 __device__ __forceinline__ float score_center_2x2(
-    const float conv_z0[513][6],
-    const float conv_z1[513][6],
+    const float conv_z0[256][6],
+    const float conv_z1[256][6],
     const IndexT* idx0,
     const IndexT* idx1)
 {
   return
-      conv_z0[idx0[2]][2] +
-      conv_z0[idx0[3]][3] +
-      conv_z1[idx1[2]][2] +
-      conv_z1[idx1[3]][3];
+      conv_z0[idx0[2] & 0xFF][2] +
+      conv_z0[idx0[3] & 0xFF][3] +
+      conv_z1[idx1[2] & 0xFF][2] +
+      conv_z1[idx1[3] & 0xFF][3];
 }
 
 template <typename IndexT>
 __device__ __forceinline__ float score_full_12(
-    const float conv_z0[513][6],
-    const float conv_z1[513][6],
+    const float conv_z0[256][6],
+    const float conv_z1[256][6],
     const IndexT* idx0,
     const IndexT* idx1)
 {
   float score = 0.0f;
 #pragma unroll
   for (int i = 0; i < 6; ++i) {
-    score += conv_z0[idx0[i]][i];
-    score += conv_z1[idx1[i]][i];
+    score += conv_z0[idx0[i] & 0xFF][i];
+    score += conv_z1[idx1[i] & 0xFF][i];
   }
   return score;
 }
@@ -743,8 +743,8 @@ __launch_bounds__(block_dim_x) void kernel(
   __shared__ alignas(16) ImprovedNoise oct_0A;
   __shared__ alignas(16) float shared_kernel_0A[6][6][16][2];
 
-  __shared__ float conv_z0[513][6];
-  __shared__ float conv_z1[513][6];
+  __shared__ float conv_z0[256][6];
+  __shared__ float conv_z1[256][6];
 
   __shared__ alignas(16) uint8_t idx_xy[2][272];
 
@@ -787,8 +787,6 @@ __launch_bounds__(block_dim_x) void kernel(
 
         conv_z0[nz][dnx] = conv0;
         conv_z1[nz][dnx] = conv1;
-        conv_z0[nz + 256][dnx] = conv0;
-        conv_z1[nz + 256][dnx] = conv1;
       }
     }
 
@@ -889,8 +887,8 @@ __launch_bounds__(block_dim_x) void kernel(
   __shared__ alignas(16) ImprovedNoise oct_0B;
   __shared__ alignas(16) float shared_kernel_0B[6][6][16][2];
 
-  __shared__ float conv_z0[513][6];
-  __shared__ float conv_z1[513][6];
+  __shared__ float conv_z0[256][6];
+  __shared__ float conv_z1[256][6];
 
   for (uint32_t i = threadIdx.x; i < 288; i += blockDim.x) {
     reinterpret_cast<uint4*>(shared_kernel_0B)[i] =
@@ -935,8 +933,6 @@ __launch_bounds__(block_dim_x) void kernel(
 
         conv_z0[V][dnx] = conv0;
         conv_z1[V][dnx] = conv1;
-        conv_z0[V + 256][dnx] = conv0;
-        conv_z1[V + 256][dnx] = conv1;
       }
     }
 
