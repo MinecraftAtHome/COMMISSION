@@ -18,8 +18,10 @@ struct GpuThread: Thread<GpuThread> {
     int device;
     SeedIterator &input;
     GpuOutputs &outputs;
+    bool benchmark;
+    std::atomic_bool &running;
 
-    GpuThread(int device, SeedIterator &input, GpuOutputs &outputs);
+    GpuThread(int device, SeedIterator &input, GpuOutputs &outputs, bool benchmark, std::atomic_bool &running);
 
     void run();
 };

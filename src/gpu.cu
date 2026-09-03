@@ -1666,8 +1666,8 @@ struct BufferLens {
 };
 
 
-GpuThread::GpuThread(int device, SeedIterator &input, GpuOutputs &outputs)
-    : Thread(), device(device), input(input), outputs(outputs) {
+GpuThread::GpuThread(int device, SeedIterator &input, GpuOutputs &outputs, bool benchmark, std::atomic_bool &running)
+    : Thread(), device(device), input(input), outputs(outputs), benchmark(benchmark), running(running) {
   start();
 }
 
@@ -1760,7 +1760,7 @@ void GpuThread::run() {
 
   auto start = std::chrono::steady_clock::now();
 
-  for (uint32_t i = 0; !should_stop(); i++) {
+  for (uint32_t i = 0; !should_stop() && (!benchmark || i < PRINT_INTERVAL); i++) {
     uint64_t start_seed = input.next(KernelFilterSeeds::threads_per_run);
 
     TRY_CUDA(cudaMemsetAsync(device_buffer_lens, 0, sizeof(*device_buffer_lens), stream));
@@ -1916,6 +1916,10 @@ void GpuThread::run() {
       }
       start = end;
     }
+  }
+
+  if (benchmark) {
+    running.store(false, std::memory_order_relaxed);
   }
 
   TRY_CUDA(cudaStreamDestroy(stream));
