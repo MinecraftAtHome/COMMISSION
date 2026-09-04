@@ -918,49 +918,41 @@ __launch_bounds__(block_dim_x) void kernel(
     int32_t x = x_center;
     const int32_t z = z_center + nz * cell_size;
 
+    // Only the y=0 sliding window is built on the common path. The gate reads
+    // conv_z0 alone, and it rejects the overwhelming majority of candidates, so
+    // building the y=1 window here would spend 13 adds and two shared loads per
+    // eight candidates on values almost nothing uses. The gate branch re-reads
+    // the four y=1 indices it needs straight out of idx_xy instead.
     uchar4 c0_0 = *reinterpret_cast<const uchar4*>(&idx_xy[0][0]);
     uchar4 c0_1 = *reinterpret_cast<const uchar4*>(&idx_xy[0][4]);
-    uchar4 c1_0 = *reinterpret_cast<const uchar4*>(&idx_xy[1][0]);
-    uchar4 c1_1 = *reinterpret_cast<const uchar4*>(&idx_xy[1][4]);
 
     for (int32_t nx = 0; nx < 256; nx += 8) {
       uchar4 c0_2 = *reinterpret_cast<const uchar4*>(&idx_xy[0][nx + 8]);
       uchar4 c0_3 = *reinterpret_cast<const uchar4*>(&idx_xy[0][nx + 12]);
-      uchar4 c1_2 = *reinterpret_cast<const uchar4*>(&idx_xy[1][nx + 8]);
-      uchar4 c1_3 = *reinterpret_cast<const uchar4*>(&idx_xy[1][nx + 12]);
 
-      uint16_t w0[13];
+      uint16_t w0[12];
       w0[0]  = c0_0.x + nz; w0[1]  = c0_0.y + nz; w0[2]  = c0_0.z + nz; w0[3]  = c0_0.w + nz;
       w0[4]  = c0_1.x + nz; w0[5]  = c0_1.y + nz; w0[6]  = c0_1.z + nz; w0[7]  = c0_1.w + nz;
       w0[8]  = c0_2.x + nz; w0[9]  = c0_2.y + nz; w0[10] = c0_2.z + nz; w0[11] = c0_2.w + nz;
-      w0[12] = c0_3.x + nz;
-
-      uint16_t w1[13];
-      w1[0]  = c1_0.x + nz; w1[1]  = c1_0.y + nz; w1[2]  = c1_0.z + nz; w1[3]  = c1_0.w + nz;
-      w1[4]  = c1_1.x + nz; w1[5]  = c1_1.y + nz; w1[6]  = c1_1.z + nz; w1[7]  = c1_1.w + nz;
-      w1[8]  = c1_2.x + nz; w1[9]  = c1_2.y + nz; w1[10] = c1_2.z + nz; w1[11] = c1_2.w + nz;
-      w1[12] = c1_3.x + nz;
 
 #pragma unroll
       for (int candidate = 0; candidate < 8; ++candidate) {
         const uint16_t* cw0 = &w0[candidate];
-        const uint16_t* cw1 = &w1[candidate];
 
-        // the two dominant columns (x = 2, 3 -> k = 1, 2) gate everything else
+        // the two dominant columns (x = 2, 3) gate everything else
         const float gate_z0 = conv_z0[cw0[2] & 0xFF][2] + conv_z0[cw0[3] & 0xFF][3];
         if (gate_z0 >= kGradVecs1GateZ0Threshold) {
-          {
+          const uint8_t* r1 = &idx_xy[1][nx + candidate];
           // the 8-term sum is the score now; there is no separate 12-term pass
           const float score = gate_z0
               + conv_z0[cw0[1] & 0xFF][1] + conv_z0[cw0[4] & 0xFF][4]
-              + conv_z1[cw1[1] & 0xFF][1] + conv_z1[cw1[2] & 0xFF][2]
-              + conv_z1[cw1[3] & 0xFF][3] + conv_z1[cw1[4] & 0xFF][4];
+              + conv_z1[(r1[1] + nz) & 0xFF][1] + conv_z1[(r1[2] + nz) & 0xFF][2]
+              + conv_z1[(r1[3] + nz) & 0xFF][3] + conv_z1[(r1[4] + nz) & 0xFF][4];
           if (score > kGradVecs1FinalThreshold) {
             uint32_t res_idx = atomicAdd(outputs.len, 1);
             if (res_idx < outputs.max_len) {
               outputs.data[res_idx] = {seed_index, x + candidate * cell_size, z};
             }
-          }
           }
         }
       }
@@ -969,8 +961,6 @@ __launch_bounds__(block_dim_x) void kernel(
 
       c0_0 = c0_2;
       c0_1 = c0_3;
-      c1_0 = c1_2;
-      c1_1 = c1_3;
     }
   }
 }
