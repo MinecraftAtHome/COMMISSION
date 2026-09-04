@@ -723,9 +723,12 @@ void init_conv_kernels() {
 // majority of candidates: only the z0 pair is read unconditionally, and the z1
 // pair is fetched when the z0 half alone clears kGradVecs1GateZ0Threshold.
 // This is deliberately lossy - a candidate whose z1 contribution would have
-// carried it over the line is dropped - so the threshold is tuned against the
-// island sizes actually lost, not against candidate counts.
-constexpr float kGradVecs1GateZ0Threshold = -5.0f;
+// carried it over the line is dropped. At -4.0 three of the ten reference seeds
+// in seeds.txt are no longer found, including a 12,336,736-block island; -5.0
+// keeps all ten and is about 7% slower. What the threshold drops is marginal
+// detections rather than small islands: the seeds that disappear are the ones
+// found only once at baseline, and island size does not predict survival.
+constexpr float kGradVecs1GateZ0Threshold = -4.0f;
 constexpr float kGradVecs1PrefilterThreshold = -12.0f;
 constexpr float kGradVecs1FinalThreshold      = -18.0f;
 
