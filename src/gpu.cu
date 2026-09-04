@@ -378,7 +378,28 @@ __device__ float octave_yo_mod1(const XrsrRandomFork &noise_yo_fork) {
 }
 
 __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed, OutputBuffer<uint64_t> outputs) {
-  constexpr float maxScore = 0.038f; // 0.045f, 0.035f, 0.03f, 0.025f  ==  1 in 2700, 9400, 26000, 54000
+  // 0.045f, 0.035f, 0.03f, 0.025f  ==  1 in 2700, 9400, 26000, 54000
+  //
+  // Swept 0.030-0.045 on a GTX TITAN X against a neutral start region
+  // (6.87e10 seeds per run, PRINT_INTERVAL 256). 0.038 is the peak of the
+  // discovery *rate* - candidates reaching filter_2a/2b/2c per wall second -
+  // and every other value measured worse on it:
+  //
+  //   maxScore   time    scan/s   survivors    2b/s   rate vs 0.038
+  //   0.045     20.26s   3.392G   244.14ppm   57.21      -23.3%
+  //   0.038     12.86s   5.343G   159.19ppm   74.57       peak
+  //   0.035     10.34s   6.644G   105.57ppm   63.15      -15.3%
+  //   0.032      8.48s   8.106G    67.17ppm   52.24      -29.9%
+  //   0.030      7.57s   9.080G    48.34ppm   44.39      -40.5%
+  //
+  // Tightening buys raw throughput (9.1 vs 5.3 Gseed/s at 0.030) but drops more
+  // yield than it gains speed, so it is a net loss for a search that runs
+  // continuously. Loosening is capped from the other side: buffer_seeds holds
+  // only KernelSeed1::threads_per_run (65536) survivors per iteration, and at
+  // 0.045 the survivor count pins exactly to that ceiling - the excess is
+  // silently dropped by the bounds check in KernelFilterSeeds. 0.038 runs at
+  // about 65% of that capacity.
+  constexpr float maxScore = 0.038f;
 
   uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
   uint64_t seed = start_seed + index;
