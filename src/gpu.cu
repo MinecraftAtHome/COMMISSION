@@ -728,9 +728,28 @@ void init_conv_kernels() {
 // keeps all ten and is about 7% slower. What the threshold drops is marginal
 // detections rather than small islands: the seeds that disappear are the ones
 // found only once at baseline, and island size does not predict survival.
+// The 6x6 matched filter is far sparser than it looks. Taking the variance of
+// the 16 gradient values at each (x,z) cell of kernel_0A, 92% of the total sits
+// in the central 2x2 block, 96% in x-columns 2 and 3, and 99.6% in columns 1-4.
+// Columns 0 and 5 are very nearly constant in the gradient index and so carry
+// almost no information about a candidate.
+//
+// Keep columns 1..4 and fold the discarded pair into the threshold: they have
+// mean -1.9953 and sd 0.269, so testing the 8-term sum against
+// (-18.0 - -1.9953) = -16.0047 reproduces the old 12-term test to within 0.3%
+// of the score variance. That removes the separate 12-term pass entirely -- the
+// prefilter gate and the score now read the same table -- and drops the kernel
+// from 40 registers / 17712 B of shared to 32 / 13616.
+//
+// Keeping only columns 2 and 3 was also tried: faster still, but discarding 4%
+// of the variance (sd 0.939) costs marginal detections, losing two more of the
+// ten reference seeds even when the threshold is loosened to match yield.
+//
+// Predicted mean/sd of the score from this decomposition are -34.277 / 4.708;
+// measured over 42630 seeds they are -34.28 / 4.69.
 constexpr float kGradVecs1GateZ0Threshold = -4.0f;
 constexpr float kGradVecs1PrefilterThreshold = -12.0f;
-constexpr float kGradVecs1FinalThreshold      = -18.0f;
+constexpr float kGradVecs1FinalThreshold      = -16.0047f;  // 8-term score, see above
 
 constexpr float kGradVecs2PrefilterThreshold = -13.5f;
 constexpr float kGradVecs2FinalThreshold      = -20.0f;
@@ -827,6 +846,10 @@ __launch_bounds__(block_dim_x) void kernel(
   __shared__ alignas(16) ImprovedNoise oct_0A;
   __shared__ alignas(16) float shared_kernel_0A[6][6][16][2];
 
+  // only columns x = 1..4 carry information, but the row stride stays 6: at
+  // stride 6 the gate pair (x = 2, 3) sits at float offset 6i+2, always 8-byte
+  // aligned, so ptxas fuses the two loads into one LDS.U.64. A stride of 4 puts
+  // them at 4i+1 / 4i+2, never 8-byte aligned, which costs 54% on this kernel.
   __shared__ float conv_z0[256][6];
   __shared__ float conv_z1[256][6];
 
@@ -858,7 +881,7 @@ __launch_bounds__(block_dim_x) void kernel(
       }
 
 #pragma unroll
-      for (int32_t dnx = 0; dnx < 6; ++dnx) {
+      for (int32_t dnx = 1; dnx < 5; ++dnx) {
         float conv0 = 0.0f;
         float conv1 = 0.0f;
 
@@ -923,11 +946,15 @@ __launch_bounds__(block_dim_x) void kernel(
         const uint16_t* cw0 = &w0[candidate];
         const uint16_t* cw1 = &w1[candidate];
 
-        const float gate_z0 = score_center_z0(conv_z0, cw0);
+        // the two dominant columns (x = 2, 3 -> k = 1, 2) gate everything else
+        const float gate_z0 = conv_z0[cw0[2] & 0xFF][2] + conv_z0[cw0[3] & 0xFF][3];
         if (gate_z0 >= kGradVecs1GateZ0Threshold) {
-          const float gate = gate_z0 + score_center_z1(conv_z1, cw1);
-          if (gate >= kGradVecs1PrefilterThreshold) {
-          const float score = score_full_12(conv_z0, conv_z1, cw0, cw1);
+          {
+          // the 8-term sum is the score now; there is no separate 12-term pass
+          const float score = gate_z0
+              + conv_z0[cw0[1] & 0xFF][1] + conv_z0[cw0[4] & 0xFF][4]
+              + conv_z1[cw1[1] & 0xFF][1] + conv_z1[cw1[2] & 0xFF][2]
+              + conv_z1[cw1[3] & 0xFF][3] + conv_z1[cw1[4] & 0xFF][4];
           if (score > kGradVecs1FinalThreshold) {
             uint32_t res_idx = atomicAdd(outputs.len, 1);
             if (res_idx < outputs.max_len) {
