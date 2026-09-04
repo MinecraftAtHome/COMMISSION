@@ -407,26 +407,6 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   const auto seed_fork = XrsrRandom_seed_fork(seed);
   auto noise_random = seed_fork.from(device_chosen_continentalness_config.fork_hash);
 
-  // The octave tests below alternate between the two stacks -- a0 b0 a1 b1 a2 b2
-  // -- which front-loads the two heaviest weights (0.35 each). That ordering is
-  // worth keeping, and the reason is a warp-level one.
-  //
-  // Every term is non-negative, so a partial sum only grows: whatever order the
-  // terms are tested in, exactly the same seeds survive. That makes the order
-  // free to choose, and a per-thread cost model says to drain the cheap A stack
-  // first, since all three A octaves share one fork while the first B octave has
-  // to build a second one (82 of this kernel's ~285 instructions per seed).
-  //
-  // That model is wrong, because cost here is per warp, not per thread. A0 alone
-  // passes 21.7% of seeds, so 1 - (1-0.217)^32 = 99.97% of warps reach the B fork
-  // no matter what -- reordering saves nothing and costs the a1/a2 tests, which
-  // go from being reached by 53% and 16% of warps to 100% and 92%. Reordering to
-  // a0 a1 a2 b0 b1 b2 was built and measured at 2.4% *slower* overall, with an
-  // identical survivor count, matching the warp-level prediction.
-  //
-  // What actually kills warps is the a0/b0 pair: after both, thread survival is
-  // 2.4% and 47% of warps are wholly dead and skip the remaining four octaves.
-  // Testing the two heaviest terms first maximises that, so this order stands.
   const auto noise_a_yo_fork = noise_yo_fork(noise_random.fork());
   
   float c_0A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(noise_a_yo_fork);
@@ -768,6 +748,23 @@ void init_conv_kernels() {
 // Predicted mean/sd of the score from this decomposition are -34.277 / 4.708;
 // measured over 42630 seeds they are -34.28 / 4.69.
 constexpr float kGradVecs1GateZ0Threshold = -4.0f;
+
+// This gate is the hottest read in the program, and it is bound by instruction
+// issue, not by shared-memory bandwidth. The distinction was measured.
+//
+// At a row stride of 6 floats the fused LDS.U.64 reaches only 16 of the 32
+// shared banks (gcd(6,32) = 2), so every gate load is a 2-way conflict. Packing
+// the two columns into 16-bit fixed point (bias 12, scale 2730, both columns
+// then fitting in [0, 32760] so their sum can be compared in the high half of a
+// word) halves the bytes moved and makes the access conflict-free at stride 1.
+// Built and measured, it was 23% slower on this kernel and 9.7% slower overall,
+// bit-exact -- the four integer ops it needs per candidate cost more than the
+// bandwidth it saves, because the conflict replays already hide under the ALU
+// work. The float pair plus one FADD and one FSETP is the cheaper formulation.
+//
+// A 4-way conflict is a different matter: at stride 4 the same loads reach only
+// 8 banks and the kernel turns 54% slower, so the LSU does become the limit
+// there. This sits just on the ALU-bound side of that crossover.
 constexpr float kGradVecs1PrefilterThreshold = -12.0f;
 constexpr float kGradVecs1FinalThreshold      = -16.0047f;  // 8-term score, see above
 
