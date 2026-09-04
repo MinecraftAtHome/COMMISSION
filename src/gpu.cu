@@ -407,6 +407,26 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   const auto seed_fork = XrsrRandom_seed_fork(seed);
   auto noise_random = seed_fork.from(device_chosen_continentalness_config.fork_hash);
 
+  // The octave tests below alternate between the two stacks -- a0 b0 a1 b1 a2 b2
+  // -- which front-loads the two heaviest weights (0.35 each). That ordering is
+  // worth keeping, and the reason is a warp-level one.
+  //
+  // Every term is non-negative, so a partial sum only grows: whatever order the
+  // terms are tested in, exactly the same seeds survive. That makes the order
+  // free to choose, and a per-thread cost model says to drain the cheap A stack
+  // first, since all three A octaves share one fork while the first B octave has
+  // to build a second one (82 of this kernel's ~285 instructions per seed).
+  //
+  // That model is wrong, because cost here is per warp, not per thread. A0 alone
+  // passes 21.7% of seeds, so 1 - (1-0.217)^32 = 99.97% of warps reach the B fork
+  // no matter what -- reordering saves nothing and costs the a1/a2 tests, which
+  // go from being reached by 53% and 16% of warps to 100% and 92%. Reordering to
+  // a0 a1 a2 b0 b1 b2 was built and measured at 2.4% *slower* overall, with an
+  // identical survivor count, matching the warp-level prediction.
+  //
+  // What actually kills warps is the a0/b0 pair: after both, thread survival is
+  // 2.4% and 47% of warps are wholly dead and skip the remaining four octaves.
+  // Testing the two heaviest terms first maximises that, so this order stands.
   const auto noise_a_yo_fork = noise_yo_fork(noise_random.fork());
   
   float c_0A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(noise_a_yo_fork);
