@@ -1814,6 +1814,40 @@ void GpuThread::run() {
 
     TRY_CUDA(cudaStreamSynchronize(stream));
 
+#ifdef DIAG_GRADVECS_1
+    {
+      const uint32_t g1 = host_buffer_lens.results_len_filter_gradvecs_1;
+      long long xmin = (1ll << 62), xmax = -(1ll << 62), zmin = (1ll << 62), zmax = -(1ll << 62);
+      uint32_t g1tgt = 0;
+      std::vector<SeedPos> diag_buf(std::max(1u, g1));
+      if (g1) {
+        TRY_CUDA(cudaMemcpy(diag_buf.data(), outputs_filter_gradvecs_1.data, sizeof(SeedPos) * g1, cudaMemcpyDeviceToHost));
+        for (uint32_t q = 0; q < g1; q++) {
+          if (diag_buf[q].seed_index != 0) continue;
+          g1tgt++;
+          xmin = std::min<long long>(xmin, diag_buf[q].x); xmax = std::max<long long>(xmax, diag_buf[q].x);
+          zmin = std::min<long long>(zmin, diag_buf[q].z); zmax = std::max<long long>(zmax, diag_buf[q].z);
+        }
+      }
+      const uint32_t a1 = host_buffer_lens.results_len_filter_2_0a;
+      long long axmin = (1ll << 62), axmax = -(1ll << 62), azmin = (1ll << 62), azmax = -(1ll << 62);
+      uint32_t a1tgt = 0;
+      std::vector<SeedPos> diag_buf2(std::max(1u, a1));
+      if (a1) {
+        TRY_CUDA(cudaMemcpy(diag_buf2.data(), outputs_filter_2_0a.data, sizeof(SeedPos) * a1, cudaMemcpyDeviceToHost));
+        for (uint32_t q = 0; q < a1; q++) {
+          if (diag_buf2[q].seed_index != 0) continue;
+          a1tgt++;
+          axmin = std::min<long long>(axmin, diag_buf2[q].x); axmax = std::max<long long>(axmax, diag_buf2[q].x);
+          azmin = std::min<long long>(azmin, diag_buf2[q].z); azmax = std::max<long long>(azmax, diag_buf2[q].z);
+        }
+      }
+      std::printf("DIAG_SEED start_seed=%" PRIi64 " g1tgt=%u g1_x[%lld,%lld] g1_z[%lld,%lld] a1tgt=%u a1_x[%lld,%lld] a1_z[%lld,%lld]\n",
+        start_seed, g1tgt, xmin, xmax, zmin, zmax, a1tgt, axmin, axmax, azmin, azmax);
+      fflush(stdout);
+    }
+#endif
+
     host_buffer_lens.results_len_filter_seeds = std::min(host_buffer_lens.results_len_filter_seeds, outputs_filter_seeds.max_len);
     host_buffer_lens.results_len_filter_gradvecs_1 = std::min(host_buffer_lens.results_len_filter_gradvecs_1, outputs_filter_gradvecs_1.max_len);
     host_buffer_lens.results_len_filter_2_0a = std::min(host_buffer_lens.results_len_filter_2_0a, outputs_filter_2_0a.max_len);
