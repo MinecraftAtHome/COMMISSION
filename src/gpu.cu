@@ -696,7 +696,7 @@ void init_conv_kernels() {
 }
 
 constexpr float kGradVecs1PrefilterThreshold = -12.0f;
-constexpr float kGradVecs1FinalThreshold      = -18.5f;
+constexpr float kGradVecs1FinalThreshold      = -18.0f;
 
 constexpr float kGradVecs2PrefilterThreshold = -13.5f;
 constexpr float kGradVecs2FinalThreshold      = -20.0f;
