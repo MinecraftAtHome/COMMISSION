@@ -861,6 +861,19 @@ __launch_bounds__(block_dim_x) void kernel(
     const KernelSeed1::Result* __restrict__ results)
 {
   __shared__ alignas(16) ImprovedNoise oct_0A;
+  // Occupancy is at its optimum here and should be left alone. This block uses
+  // 17712 bytes of shared memory, which fits 5 blocks per SM (62% occupancy).
+  // Both neighbours were built and measured round-robin against it:
+  //
+  //   4 blocks / 50%  (padded to 20112 B)              gradvecs_1  +4.18%
+  //   5 blocks / 62%  (this)                           gradvecs_1   best
+  //   6 blocks / 75%  (staging only kernel columns 1-4
+  //                    for 16176 B, under the 16384
+  //                    needed for a 6th block)         gradvecs_1  +1.23%
+  //
+  // Dropping to 4 hurts, but buying a 6th block does not help -- the kernel is
+  // issue-bound, so extra resident warps have no latency left to hide, and the
+  // narrower staging costs a little address arithmetic. 5 is the peak.
   __shared__ alignas(16) float shared_kernel_0A[6][6][16][2];
 
   // only columns x = 1..4 carry information, but the row stride stays 6: at
