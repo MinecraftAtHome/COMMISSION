@@ -716,6 +716,16 @@ void init_conv_kernels() {
   TRY_CUDA(cudaMemcpy(device_kernel_0B_addr, temp_0B, sizeof(temp_0B), cudaMemcpyHostToDevice));
 }
 
+// Two-stage gate. The 2x2 prefilter reads two values from conv_z0 and two from
+// conv_z1; a gate-disabled probe showed it is ~93% of KernelFilterGradVecs1 and
+// the kernel runs near this device's shared-memory roofline, so those loads are
+// the binding cost. Splitting it lets the conv_z1 half be skipped for the large
+// majority of candidates: only the z0 pair is read unconditionally, and the z1
+// pair is fetched when the z0 half alone clears kGradVecs1GateZ0Threshold.
+// This is deliberately lossy - a candidate whose z1 contribution would have
+// carried it over the line is dropped - so the threshold is tuned against the
+// island sizes actually lost, not against candidate counts.
+constexpr float kGradVecs1GateZ0Threshold = -5.0f;
 constexpr float kGradVecs1PrefilterThreshold = -12.0f;
 constexpr float kGradVecs1FinalThreshold      = -18.0f;
 
@@ -740,6 +750,20 @@ __device__ __forceinline__ float score_center_2x2(
       conv_z0[idx0[3] & 0xFF][3] +
       conv_z1[idx1[2] & 0xFF][2] +
       conv_z1[idx1[3] & 0xFF][3];
+}
+
+template <typename IndexT>
+__device__ __forceinline__ float score_center_z0(
+    const float conv_z0[256][6], const IndexT* idx0)
+{
+  return conv_z0[idx0[2] & 0xFF][2] + conv_z0[idx0[3] & 0xFF][3];
+}
+
+template <typename IndexT>
+__device__ __forceinline__ float score_center_z1(
+    const float conv_z1[256][6], const IndexT* idx1)
+{
+  return conv_z1[idx1[2] & 0xFF][2] + conv_z1[idx1[3] & 0xFF][3];
 }
 
 template <typename IndexT>
@@ -896,14 +920,17 @@ __launch_bounds__(block_dim_x) void kernel(
         const uint16_t* cw0 = &w0[candidate];
         const uint16_t* cw1 = &w1[candidate];
 
-        const float gate = score_center_2x2(conv_z0, conv_z1, cw0, cw1);
-        if (gate >= kGradVecs1PrefilterThreshold) {
+        const float gate_z0 = score_center_z0(conv_z0, cw0);
+        if (gate_z0 >= kGradVecs1GateZ0Threshold) {
+          const float gate = gate_z0 + score_center_z1(conv_z1, cw1);
+          if (gate >= kGradVecs1PrefilterThreshold) {
           const float score = score_full_12(conv_z0, conv_z1, cw0, cw1);
           if (score > kGradVecs1FinalThreshold) {
             uint32_t res_idx = atomicAdd(outputs.len, 1);
             if (res_idx < outputs.max_len) {
               outputs.data[res_idx] = {seed_index, x + candidate * cell_size, z};
             }
+          }
           }
         }
       }
