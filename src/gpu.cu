@@ -374,7 +374,7 @@ __device__ float octave_yo_mod1(const XrsrRandomFork &noise_yo_fork) {
   uint64_t h = noise_yo_fork.hi ^ fork_hash.hi;
   uint64_t r = XrsrRandom::rol64(l + h, 17) + l;
   
-  return ((r >> 32) & 0xFFFFFF) * 5.9604645E-8f;
+  return (uint32_t)((r >> 32) & 0xFFFFFF) * 5.9604645E-8f;
 }
 
 __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed, OutputBuffer<uint64_t> outputs) {
@@ -701,6 +701,12 @@ constexpr float kGradVecs1FinalThreshold      = -18.5f;
 constexpr float kGradVecs2PrefilterThreshold = -13.5f;
 constexpr float kGradVecs2FinalThreshold      = -20.0f;
 
+// Layout note: KernelFilterGradVecs1 keeps conv as [256][6]. Consecutive
+// candidates reuse the same permutation index at adjacent columns, so ptxas
+// fuses those pairs into LDS.U.64, and with idx = base + threadIdx.x the two
+// 16-lane phases of that access cover all 32 banks exactly once. Transposing it
+// measurably loses. KernelFilterGradVecs2 has no such sliding-window reuse, so
+// it uses the transposed [6][256] layout, which is conflict-free there.
 template <typename IndexT>
 __device__ __forceinline__ float score_center_2x2(
     const float conv_z0[256][6],
@@ -716,6 +722,20 @@ __device__ __forceinline__ float score_center_2x2(
 }
 
 template <typename IndexT>
+__device__ __forceinline__ float score_center_2x2_t(
+    const float conv_z0[6][256],
+    const float conv_z1[6][256],
+    const IndexT* idx0,
+    const IndexT* idx1)
+{
+  return
+      conv_z0[2][idx0[2] & 0xFF] +
+      conv_z0[3][idx0[3] & 0xFF] +
+      conv_z1[2][idx1[2] & 0xFF] +
+      conv_z1[3][idx1[3] & 0xFF];
+}
+
+template <typename IndexT>
 __device__ __forceinline__ float score_full_12(
     const float conv_z0[256][6],
     const float conv_z1[256][6],
@@ -727,6 +747,22 @@ __device__ __forceinline__ float score_full_12(
   for (int i = 0; i < 6; ++i) {
     score += conv_z0[idx0[i] & 0xFF][i];
     score += conv_z1[idx1[i] & 0xFF][i];
+  }
+  return score;
+}
+
+template <typename IndexT>
+__device__ __forceinline__ float score_full_12_t(
+    const float conv_z0[6][256],
+    const float conv_z1[6][256],
+    const IndexT* idx0,
+    const IndexT* idx1)
+{
+  float score = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 6; ++i) {
+    score += conv_z0[i][idx0[i] & 0xFF];
+    score += conv_z1[i][idx1[i] & 0xFF];
   }
   return score;
 }
@@ -887,8 +923,8 @@ __launch_bounds__(block_dim_x) void kernel(
   __shared__ alignas(16) ImprovedNoise oct_0B;
   __shared__ alignas(16) float shared_kernel_0B[6][6][16][2];
 
-  __shared__ float conv_z0[256][6];
-  __shared__ float conv_z1[256][6];
+  __shared__ float conv_z0[6][256];
+  __shared__ float conv_z1[6][256];
 
   for (uint32_t i = threadIdx.x; i < 288; i += blockDim.x) {
     reinterpret_cast<uint4*>(shared_kernel_0B)[i] =
@@ -931,8 +967,8 @@ __launch_bounds__(block_dim_x) void kernel(
           conv1 += shared_kernel_0B[dnx][dnz][p][1];
         }
 
-        conv_z0[V][dnx] = conv0;
-        conv_z1[V][dnx] = conv1;
+        conv_z0[dnx][V] = conv0;
+        conv_z1[dnx][V] = conv1;
       }
     }
 
@@ -970,9 +1006,9 @@ __launch_bounds__(block_dim_x) void kernel(
           idx1[i] = hoisted_idx_xy[1][i] + nz_masked;
         }
 
-        const float gate = score_center_2x2(conv_z0, conv_z1, idx0, idx1);
+        const float gate = score_center_2x2_t(conv_z0, conv_z1, idx0, idx1);
         if (gate >= kGradVecs2PrefilterThreshold) {
-          const float score = score_full_12(conv_z0, conv_z1, idx0, idx1);
+          const float score = score_full_12_t(conv_z0, conv_z1, idx0, idx1);
           if (score > kGradVecs2FinalThreshold) {
             uint32_t result_index = atomicAdd(outputs.len, 1);
             if (result_index < outputs.max_len) {
@@ -1224,7 +1260,11 @@ __global__ __launch_bounds__(T::threads_per_block) void kernel(InputBuffer<SeedP
 template <int32_t NoiseThreshold, size_t Octaves, uint32_t PosRange, uint32_t Samples, uint32_t MinCount, bool FlippedSparseSamples, bool MoveCenter, bool OnlyA>
 void Template<NoiseThreshold, Octaves, PosRange, Samples, MinCount, FlippedSparseSamples, MoveCenter, OnlyA>::run(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs, KernelSeed1::Result *results, cudaStream_t stream) {
   using T = Template<NoiseThreshold, Octaves, PosRange, Samples, MinCount, FlippedSparseSamples, MoveCenter, OnlyA>;
-  kernel<T><<<32 * 256, T::threads_per_block, 0, stream>>>(inputs, outputs, results);
+  // These stages see very few inputs per launch (filter_2d averages well under
+  // one), and at 255 registers only one block fits per SM, so a 8192-block grid
+  // costs hundreds of near-empty waves of kernel prologue. The kernel already
+  // grid-strides over its inputs, so a smaller grid is equally correct.
+  kernel<T><<<256, T::threads_per_block, 0, stream>>>(inputs, outputs, results);
   TRY_CUDA(cudaGetLastError());
 }
 } // namespace KernelFilter2
