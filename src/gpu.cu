@@ -443,17 +443,84 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   // to mix64(s)'s first multiply is X0 ^ j = P1 + r for r = (X0 & 31) ^ j.
   // Walking r rather than j makes that an arithmetic progression, so its product
   // with MIX1 is an accumulator: one multiply for the run, one add per seed.
+  //
+  // The a0 test rejects 78% of seeds, but it rejects them per *lane*, and a warp
+  // costs the same whether one lane is live or all 32. With a0 passing 21.7%,
+  // 1 - (1-0.217)^32 = 99.97% of warps reach the second fork regardless, so that
+  // fork -- and the whole tail behind it -- is paid at full warp width for a
+  // fifth of the work. Measured, everything after the a0 test is 26.9% of this
+  // stage, so running it at true occupancy is worth up to a fifth of the kernel.
+  //
+  // So survivors are staged instead. Each warp keeps a small shared queue; a
+  // ballot gives every live lane a slot, and once 32 have accumulated the warp
+  // drains them as one full-width batch. The tail then runs on packed warps
+  // rather than mostly-idle ones. Queue depth is 64 because a drain leaves at
+  // most 31 behind and the next round can add 32.
   constexpr uint32_t N = seeds_per_thread;
+  constexpr uint32_t warps_per_block = threads_per_block / 32;
+  constexpr uint32_t stage_depth = 64;
+
+  // [warp][word][slot]: slot last so a batch's lanes read consecutive words.
+  // 10 words: post-A-fork rng state, the A yo-fork, and the seed. Carrying the
+  // A yo-fork costs shared memory -- 20480 bytes puts this at 4 blocks per SM
+  // rather than 8 -- but it beats rebuilding it. A 6-word variant that stages
+  // only the pre-fork state and redoes the A fork in the drain fits 7 blocks and
+  // still came out slower, -5.42% against -6.77% on this stage, because
+  // filter_seeds barely cares about occupancy: forcing 6 blocks costs 0.68% and
+  // 5 blocks 1.20%, far less than the fork it would save.
+  __shared__ uint32_t stage[warps_per_block][10][stage_depth];
+
+  const uint32_t warp = threadIdx.x >> 5;
+  const uint32_t lane = threadIdx.x & 31;
+  uint32_t staged = 0;   // uniform across the warp
+
   const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
   const uint64_t base = start_seed + (uint64_t)index * N;
   const uint64_t S0 = base ^ XrsrRandom::XRSR_SILVER_RATIO;
   const uint64_t X0 = S0 ^ (S0 >> 30);
   uint64_t acc_a = (X0 & ~(uint64_t)(N - 1)) * XrsrRandom::XRSR_MIX1;
-  // s for this run is S0 ^ j, and j = (X0 & 31) ^ r, so s = C ^ r with C fixed.
   const uint64_t C = S0 ^ (X0 & (N - 1));
 
-  // Unroll 2: measured -3.47% on this stage against -2.12% unrolled once and
-  // -1.44% unrolled four times, where register pressure starts to bite.
+#define OMISSION_DRAIN(ACTIVE)                                                         \
+  {                                                                                    \
+    const uint32_t active_ = (ACTIVE);                                                 \
+    if (lane < active_) {                                                              \
+      XrsrRandom nr;                                                                   \
+      nr.lo = (uint64_t)stage[warp][0][lane] | ((uint64_t)stage[warp][1][lane] << 32);  \
+      nr.hi = (uint64_t)stage[warp][2][lane] | ((uint64_t)stage[warp][3][lane] << 32);  \
+      XrsrRandomFork a_yo;                                                             \
+      a_yo.lo = (uint64_t)stage[warp][4][lane] | ((uint64_t)stage[warp][5][lane] << 32);\
+      a_yo.hi = (uint64_t)stage[warp][6][lane] | ((uint64_t)stage[warp][7][lane] << 32);\
+      const uint64_t seed_ = (uint64_t)stage[warp][8][lane]                            \
+                           | ((uint64_t)stage[warp][9][lane] << 32);                    \
+      float sc = 0.35f * fabsf(                                                        \
+          octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(a_yo) - 0.5f);     \
+      const auto b_yo = noise_yo_fork(nr.fork());                                       \
+      sc += 0.35f * fabsf(                                                              \
+          octave_yo_mod1<chosen_continentalness_config.octaves_b[0]>(b_yo) - 0.5f);     \
+      if (sc < maxScore) {                                                              \
+        sc += 0.11f * fabsf(                                                            \
+            octave_yo_mod1<chosen_continentalness_config.octaves_a[1]>(a_yo) - 0.5f);   \
+        if (sc < maxScore) {                                                            \
+          sc += 0.11f * fabsf(                                                          \
+              octave_yo_mod1<chosen_continentalness_config.octaves_b[1]>(b_yo) - 0.5f); \
+          if (sc < maxScore) {                                                          \
+            sc += 0.04f * fabsf(                                                        \
+                octave_yo_mod1<chosen_continentalness_config.octaves_a[2]>(a_yo) - 0.5f);\
+            if (sc < maxScore) {                                                        \
+              sc += 0.04f * fabsf(                                                      \
+                  octave_yo_mod1<chosen_continentalness_config.octaves_b[2]>(b_yo)-0.5f);\
+              if (sc < maxScore) {                                                      \
+                uint32_t ri = atomicAdd(outputs.len, 1);                                \
+                if (ri < outputs.max_len) { outputs.data[ri] = seed_; }                 \
+              }                                                                         \
+            }                                                                           \
+          }                                                                             \
+        }                                                                               \
+      }                                                                                 \
+    }                                                                                   \
+  }
+
 #pragma unroll 2
   for (uint32_t r = 0; r < N; ++r, acc_a += XrsrRandom::XRSR_MIX1) {
     const uint64_t s = C ^ r;
@@ -462,51 +529,50 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
 
     const XrsrRandomFork seed_fork = XrsrRandom_seed_fork_from_lh(l, h);
     auto noise_random = seed_fork.from(device_chosen_continentalness_config.fork_hash);
+    const auto noise_a_yo_fork = noise_yo_fork(noise_random.fork());
 
-  const auto noise_a_yo_fork = noise_yo_fork(noise_random.fork());
-  
-  float c_0A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(noise_a_yo_fork);
-  float score = 0.35f * fabsf(c_0A_yo - 0.5f);
-  if (score >= maxScore) {
-      continue;
+    const float c_0A_yo =
+        octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(noise_a_yo_fork);
+    const bool live = (0.35f * fabsf(c_0A_yo - 0.5f) < maxScore);
+
+    const uint32_t mask = __ballot_sync(0xFFFFFFFFu, live);
+    const uint32_t slot = staged + __popc(mask & ((1u << lane) - 1u));
+    if (live) {
+      const uint64_t seed_v = s ^ XrsrRandom::XRSR_SILVER_RATIO;
+      stage[warp][0][slot] = (uint32_t)noise_random.lo;
+      stage[warp][1][slot] = (uint32_t)(noise_random.lo >> 32);
+      stage[warp][2][slot] = (uint32_t)noise_random.hi;
+      stage[warp][3][slot] = (uint32_t)(noise_random.hi >> 32);
+      stage[warp][4][slot] = (uint32_t)noise_a_yo_fork.lo;
+      stage[warp][5][slot] = (uint32_t)(noise_a_yo_fork.lo >> 32);
+      stage[warp][6][slot] = (uint32_t)noise_a_yo_fork.hi;
+      stage[warp][7][slot] = (uint32_t)(noise_a_yo_fork.hi >> 32);
+      stage[warp][8][slot] = (uint32_t)seed_v;
+      stage[warp][9][slot] = (uint32_t)(seed_v >> 32);
     }
+    staged += __popc(mask);
 
-  const auto noise_b_yo_fork = noise_yo_fork(noise_random.fork());
-  float c_0B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[0]>(noise_b_yo_fork);
-  score += 0.35f * fabsf(c_0B_yo - 0.5f);
-  if (score >= maxScore) {
-      continue;
-    }
-
-  float c_1A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[1]>(noise_a_yo_fork);
-  score += 0.11f * fabsf(c_1A_yo - 0.5f);
-  if (score >= maxScore) {
-      continue;
-    }
-
-  float c_1B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[1]>(noise_b_yo_fork);
-  score += 0.11f * fabsf(c_1B_yo - 0.5f);
-  if (score >= maxScore) {
-      continue;
-    }
-
-  float c_2A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[2]>(noise_a_yo_fork);
-  score += 0.04f * fabsf(c_2A_yo - 0.5f);
-  if (score >= maxScore) {
-      continue;
-    }
-
-  float c_2B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[2]>(noise_b_yo_fork);
-  score += 0.04f * fabsf(c_2B_yo - 0.5f);
-  if (score >= maxScore) {
-      continue;
-    }
-
-  uint32_t result_index = atomicAdd(outputs.len, 1);
-    if (result_index < outputs.max_len) {
-      outputs.data[result_index] = s ^ XrsrRandom::XRSR_SILVER_RATIO;
+    if (staged >= 32) {
+      __syncwarp();
+      OMISSION_DRAIN(32u)
+      __syncwarp();
+      staged -= 32;
+      // slide the leftovers down so slot 0 is always the queue head
+      if (lane < staged) {
+#pragma unroll
+        for (uint32_t k = 0; k < 10; ++k) {
+          stage[warp][k][lane] = stage[warp][k][lane + 32];
+        }
+      }
+      __syncwarp();
     }
   }
+
+  if (staged != 0) {
+    __syncwarp();
+    OMISSION_DRAIN(staged)
+  }
+#undef OMISSION_DRAIN
 }
 
 void run(uint64_t start_seed, OutputBuffer<uint64_t> outputs, cudaStream_t stream) {
