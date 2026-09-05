@@ -1001,23 +1001,41 @@ __launch_bounds__(block_dim_x) void kernel(
       w0[4]  = c0_1.x + nz; w0[5]  = c0_1.y + nz; w0[6]  = c0_1.z + nz; w0[7]  = c0_1.w + nz;
       w0[8]  = c0_2.x + nz; w0[9]  = c0_2.y + nz; w0[10] = c0_2.z + nz; w0[11] = c0_2.w + nz;
 
+      // The gate rejects almost every candidate, so testing each one separately
+      // spends an FSETP and a branch per candidate on a branch that is almost
+      // never taken. Since gate >= T for *any* candidate in a group iff the
+      // group's maximum does, 4 candidates share one branch: 4 FADD plus
+      // 3 FMAX plus one test, against 4 tests. Inside, each candidate is
+      // still checked individually, so the result is unchanged.
 #pragma unroll
-      for (int candidate = 0; candidate < 8; ++candidate) {
-        const uint16_t* cw0 = &w0[candidate];
+      for (int grp = 0; grp < 2; ++grp) {
+        float g[4];
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          const uint16_t* cw0 = &w0[grp * 4 + c];
+          g[c] = conv_z0[cw0[2] & 0xFF][2] + conv_z0[cw0[3] & 0xFF][3];
+        }
+        float gmax = g[0];
+#pragma unroll
+        for (int c = 1; c < 4; ++c) { gmax = fmaxf(gmax, g[c]); }
 
-        // the two dominant columns (x = 2, 3) gate everything else
-        const float gate_z0 = conv_z0[cw0[2] & 0xFF][2] + conv_z0[cw0[3] & 0xFF][3];
-        if (gate_z0 >= kGradVecs1GateZ0Threshold) {
-          const uint8_t* r1 = &idx_xy[1][nx + candidate];
-          // the 8-term sum is the score now; there is no separate 12-term pass
-          const float score = gate_z0
-              + conv_z0[cw0[1] & 0xFF][1] + conv_z0[cw0[4] & 0xFF][4]
-              + conv_z1[(r1[1] + nz) & 0xFF][1] + conv_z1[(r1[2] + nz) & 0xFF][2]
-              + conv_z1[(r1[3] + nz) & 0xFF][3] + conv_z1[(r1[4] + nz) & 0xFF][4];
-          if (score > kGradVecs1FinalThreshold) {
-            uint32_t res_idx = atomicAdd(outputs.len, 1);
-            if (res_idx < outputs.max_len) {
-              outputs.data[res_idx] = {seed_index, x + candidate * cell_size, z};
+        if (gmax >= kGradVecs1GateZ0Threshold) {
+#pragma unroll
+          for (int c = 0; c < 4; ++c) {
+            if (g[c] < kGradVecs1GateZ0Threshold) { continue; }
+            const int candidate = grp * 4 + c;
+            const uint16_t* cw0 = &w0[candidate];
+            const uint8_t* r1 = &idx_xy[1][nx + candidate];
+            // the 8-term sum is the score now; there is no separate 12-term pass
+            const float score = g[c]
+                + conv_z0[cw0[1] & 0xFF][1] + conv_z0[cw0[4] & 0xFF][4]
+                + conv_z1[(r1[1] + nz) & 0xFF][1] + conv_z1[(r1[2] + nz) & 0xFF][2]
+                + conv_z1[(r1[3] + nz) & 0xFF][3] + conv_z1[(r1[4] + nz) & 0xFF][4];
+            if (score > kGradVecs1FinalThreshold) {
+              uint32_t res_idx = atomicAdd(outputs.len, 1);
+              if (res_idx < outputs.max_len) {
+                outputs.data[res_idx] = {seed_index, x + candidate * cell_size, z};
+              }
             }
           }
         }
