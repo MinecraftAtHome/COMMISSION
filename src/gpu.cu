@@ -302,6 +302,30 @@ __device__ inline uint64_t mix64_finish(uint64_t x) {
   return x ^ (x >> 31);
 }
 
+// fork() runs two full state updates, but the second is only ever needed by the
+// B fork -- the two values it returns are already fixed before it happens.
+// filter_seeds defers the B fork to its drain, so in the prologue that update is
+// pure waste on the 78% of seeds that never get there. fork_short stops one
+// update short; advance_one supplies it in the drain.
+__device__ inline XrsrRandomFork fork_short(XrsrRandom &rng) {
+  const uint64_t l = rng.lo, h = rng.hi;
+  const uint64_t r1 = XrsrRandom::rol64(l + h, 17) + l;
+  const uint64_t hx = h ^ l;
+  const uint64_t l2 = XrsrRandom::rol64(l, 49) ^ hx ^ (hx << 21);
+  const uint64_t h2 = XrsrRandom::rol64(hx, 28);
+  const uint64_t r2 = XrsrRandom::rol64(l2 + h2, 17) + l2;
+  rng.lo = l2;
+  rng.hi = h2;
+  return { r1, r2 };
+}
+
+__device__ inline void advance_one(XrsrRandom &rng) {
+  const uint64_t l = rng.lo;
+  const uint64_t hx = rng.hi ^ l;
+  rng.lo = XrsrRandom::rol64(l, 49) ^ hx ^ (hx << 21);
+  rng.hi = XrsrRandom::rol64(hx, 28);
+}
+
 __device__ inline XrsrRandomFork XrsrRandom_seed_fork_from_lh(uint64_t l, uint64_t h) {
   uint64_t r1 = XrsrRandom::rol64(l + h, 17) + l;
   h ^= l;
@@ -495,6 +519,7 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
                            | ((uint64_t)stage[warp][9][lane] << 32);                    \
       float sc = 0.35f * fabsf(                                                        \
           octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(a_yo) - 0.5f);     \
+      advance_one(nr);                                                                \
       const auto b_yo = noise_yo_fork(nr.fork());                                       \
       sc += 0.35f * fabsf(                                                              \
           octave_yo_mod1<chosen_continentalness_config.octaves_b[0]>(b_yo) - 0.5f);     \
@@ -529,7 +554,7 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
 
     const XrsrRandomFork seed_fork = XrsrRandom_seed_fork_from_lh(l, h);
     auto noise_random = seed_fork.from(device_chosen_continentalness_config.fork_hash);
-    const auto noise_a_yo_fork = noise_yo_fork(noise_random.fork());
+    const auto noise_a_yo_fork = noise_yo_fork(fork_short(noise_random));
 
     const float c_0A_yo =
         octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(noise_a_yo_fork);
