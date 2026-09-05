@@ -1017,8 +1017,26 @@ __launch_bounds__(block_dim_x) void kernel(
   // stride 6 the gate pair (x = 2, 3) sits at float offset 6i+2, always 8-byte
   // aligned, so ptxas fuses the two loads into one LDS.U.64. A stride of 4 puts
   // them at 4i+1 / 4i+2, never 8-byte aligned, which costs 54% on this kernel.
-  __shared__ float conv_z0[256][6];
-  __shared__ float conv_z1[256][6];
+  // Only kernel columns 1..4 are ever read, so the row is 5 wide, not 6, with
+  // column x stored at x-1 and one slot of padding. Two gains: 2048 fewer bytes
+  // of shared memory, and a stride of 5, which is coprime with the 32 shared
+  // banks -- since the candidate list made these reads random rather than
+  // consecutive, an odd stride reaches all 32 banks where 6 reached only 16.
+  //
+  // A tighter gate was tried on top of this and rejected. The bound here is
+  // one-sided: rows survive if A[t] >= T - max(B). Adding the mirror condition
+  // B[s] >= T - max(A) and keeping only pairs whose difference matches some nx's
+  // lag cuts the work from 65536 grid points to about 870 pairs -- 75x fewer,
+  // and 8.5x fewer than the one-sided list's 7398 checks. Both a prefix-summed
+  // CSR of nx-by-lag and fixed-capacity buckets were built, both bit-exact at
+  // 49137561 candidates, and both were worth almost nothing: -5.8% and -8.1% on
+  // this kernel against a predicted 3.6x. gradvecs_1 sees only ~4.5 hits per
+  // seed, so once the scan is down to 28 rows the per-seed bookkeeping -- two
+  // block-wide max reductions, two ballot compactions, the lag structure and its
+  // barriers -- costs more than the scan it removes. The one-sided list already
+  // takes essentially all of the available win.
+  __shared__ float conv_z0[256][5];
+  __shared__ float conv_z1[256][5];
 
   __shared__ alignas(16) uint8_t idx_xy[2][272];
   // The gate is A[t] + B[t+d] >= T with A = conv_z0[.][2] and B = conv_z0[.][3].
@@ -1068,8 +1086,8 @@ __launch_bounds__(block_dim_x) void kernel(
           conv1 += shared_kernel_0A[dnx][dnz][p][1];
         }
 
-        conv_z0[nz][dnx] = conv0;
-        conv_z1[nz][dnx] = conv1;
+        conv_z0[nz][dnx - 1] = conv0;
+        conv_z1[nz][dnx - 1] = conv1;
       }
     }
 
@@ -1094,7 +1112,7 @@ __launch_bounds__(block_dim_x) void kernel(
 
     // max over B = conv_z0[.][3], reduced across the block
     {
-      float m = conv_z0[nz][3];
+      float m = conv_z0[nz][2];
 #pragma unroll
       for (int off = 16; off; off >>= 1) {
         m = fmaxf(m, __shfl_down_sync(0xFFFFFFFFu, m, off));
@@ -1108,7 +1126,7 @@ __launch_bounds__(block_dim_x) void kernel(
 
     // list the t values that could still clear the gate
     {
-      const float a = conv_z0[nz][2];
+      const float a = conv_z0[nz][1];
       // Slack, because the bound is applied in floating point: fl(a + b) can
       // reach the threshold when a sits just under fl(T - max_b). Values here
       // are order 10, so an ulp is ~1e-6; 1e-3 is far more than enough and
@@ -1141,13 +1159,13 @@ __launch_bounds__(block_dim_x) void kernel(
     for (uint32_t i = 0; i < n_cand; ++i) {
       const uint32_t t = cand_t[i];          // broadcast
       const float    a = cand_a[i];          // broadcast
-      const float    b = conv_z0[(t + d) & 0xFF][3];
+      const float    b = conv_z0[(t + d) & 0xFF][2];
       if (a + b >= kGradVecs1GateZ0Threshold) {
         const uint32_t nz2 = (t - p2) & 0xFF;
         const float score = a + b
-            + conv_z0[(p1 + nz2) & 0xFF][1] + conv_z0[(p4 + nz2) & 0xFF][4]
-            + conv_z1[(q1 + nz2) & 0xFF][1] + conv_z1[(q2 + nz2) & 0xFF][2]
-            + conv_z1[(q3 + nz2) & 0xFF][3] + conv_z1[(q4 + nz2) & 0xFF][4];
+            + conv_z0[(p1 + nz2) & 0xFF][0] + conv_z0[(p4 + nz2) & 0xFF][3]
+            + conv_z1[(q1 + nz2) & 0xFF][0] + conv_z1[(q2 + nz2) & 0xFF][1]
+            + conv_z1[(q3 + nz2) & 0xFF][2] + conv_z1[(q4 + nz2) & 0xFF][3];
         if (score > kGradVecs1FinalThreshold) {
           uint32_t res_idx = atomicAdd(outputs.len, 1);
           if (res_idx < outputs.max_len) {
