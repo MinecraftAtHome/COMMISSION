@@ -770,8 +770,14 @@ __global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<uint64_t
   init_octave(noise_a_fork, device_chosen_continentalness_config.octaves_a[0].fork_hash, results, &Result::continentalness_0A, block_base, input_len, active);
   init_octave(noise_a_fork, device_chosen_continentalness_config.octaves_a[1].fork_hash, results, &Result::continentalness_1A, block_base, input_len, active);
 
-  init_octave(noise_b_fork, device_chosen_continentalness_config.octaves_b[0].fork_hash, results, &Result::continentalness_0B, block_base, input_len, active);
-  init_octave(noise_b_fork, device_chosen_continentalness_config.octaves_b[1].fork_hash, results, &Result::continentalness_1B, block_base, input_len, active);
+  // 0B and 1B are deliberately NOT built here. init_seeds runs for every seed
+  // that clears filter_seeds -- 42706 an iteration -- but nothing before
+  // gradvecs_2 reads the B stack: gradvecs_1 samples 0A, and filter_2_01a is
+  // only_a, so it takes 0A and 1A. gradvecs_2 needs 0B and filter_2_01b needs
+  // both 0B and 1B (it is a hand-written specialisation that samples
+  // octaves_b[0] and octaves_b[1], not the generic three-octave path). Those two
+  // stages see 296028 candidates an iteration between them, so building the B
+  // stack here was a large overbuild; run_late<1> builds it lazily instead.
 }
 
 __device__ void copy_noise_direct(const ImprovedNoise &shared_noise, Result *results, ImprovedNoise Result::*result_member, uint32_t seed_index) {
@@ -810,6 +816,11 @@ __global__ __launch_bounds__(threads_per_block) void late_kernel(InputBuffer<uin
 
     ImprovedNoise &noise = shared_noise[threadIdx.x];
     if constexpr (Stage == 1) {
+    // The B stack, for gradvecs_2 and filter_2_01b. Both must land here: 1B is
+    // read by filter_2_01b, so deferring it to the next stage is too late.
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[0].fork_hash, results, &Result::continentalness_0B, seed_index);
+    init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[1].fork_hash, results, &Result::continentalness_1B, seed_index);
+    } else if constexpr (Stage == 2) {
     init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[2].fork_hash, results, &Result::continentalness_2A, seed_index);
     init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[3].fork_hash, results, &Result::continentalness_3A, seed_index);
     init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[4].fork_hash, results, &Result::continentalness_4A, seed_index);
@@ -819,13 +830,13 @@ __global__ __launch_bounds__(threads_per_block) void late_kernel(InputBuffer<uin
     init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[3].fork_hash, results, &Result::continentalness_3B, seed_index);
     init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[4].fork_hash, results, &Result::continentalness_4B, seed_index);
     init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[5].fork_hash, results, &Result::continentalness_5B, seed_index);
-    } else if constexpr (Stage == 2) {
+    } else if constexpr (Stage == 3) {
     init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[6].fork_hash, results, &Result::continentalness_6A, seed_index);
     init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[6].fork_hash, results, &Result::continentalness_6B, seed_index);
-    } else if constexpr (Stage == 3) {
+    } else if constexpr (Stage == 4) {
     init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[7].fork_hash, results, &Result::continentalness_7A, seed_index);
     init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[7].fork_hash, results, &Result::continentalness_7B, seed_index);
-    } else if constexpr (Stage == 4) {
+    } else if constexpr (Stage == 5) {
     init_octave_direct(noise, noise_a_fork, device_chosen_continentalness_config.octaves_a[8].fork_hash, results, &Result::continentalness_8A, seed_index);
     init_octave_direct(noise, noise_b_fork, device_chosen_continentalness_config.octaves_b[8].fork_hash, results, &Result::continentalness_8B, seed_index);
     }
@@ -2038,7 +2049,7 @@ void GpuThread::run() {
   DeviceBuffer buffer_2(UINT32_C(1) << 29);
   std::vector<SeedPos> h_buffer;
   std::vector<StageStats> stage_stats;
-  stage_stats.reserve(16);
+  stage_stats.reserve(32);
 
   KernelSeed1::Result *results = (KernelSeed1::Result *)buffer_results.data;
 
@@ -2056,6 +2067,7 @@ void GpuThread::run() {
   auto &stage_filter_2_0a = stage_stats.emplace_back("filter_2_01a", stage_filter_gradvecs_1.outputs_len, &host_buffer_lens.results_len_filter_2_0a, 1, outputs_filter_2_0a.max_len);
 
   OutputBuffer<SeedPos> outputs_filter_gradvecs_2(buffer_2, &device_buffer_lens->results_len_filter_gradvecs_2);
+  auto &stage_init_seeds_0b = stage_stats.emplace_back("init_seeds_0b", stage_filter_2_0a.outputs_len, stage_filter_2_0a.outputs_len, 1, outputs_filter_2_0a.max_len);
   auto &stage_filter_gradvecs_2 = stage_stats.emplace_back("filter_gradvecs_2", stage_filter_2_0a.outputs_len, &host_buffer_lens.results_len_filter_gradvecs_2, KernelFilterGradVecs2::threads_per_seed, outputs_filter_gradvecs_2.max_len);
 
   OutputBuffer<SeedPos> outputs_filter_2_0b(buffer_2, &device_buffer_lens->results_len_filter_2_0b);
@@ -2123,14 +2135,17 @@ void GpuThread::run() {
     filter_2_0A_run(outputs_filter_gradvecs_1, outputs_filter_2_0a, results, stream);
     stage_filter_2_0a.record(stream);
 
+    TRY_CUDA(cudaMemsetAsync(buffer_late_init_flags.data, 0, sizeof(uint32_t) * KernelSeed1::threads_per_run, stream));
+    KernelSeed1::run_late<1>(outputs_filter_seeds, outputs_filter_2_0a, results, (uint32_t *)buffer_late_init_flags.data, stream);
+    stage_init_seeds_0b.record(stream);
+
     KernelFilterGradVecs2::run(outputs_filter_2_0a, outputs_filter_gradvecs_2, results, stream);
     stage_filter_gradvecs_2.record(stream);
 
     filter_2_0B_run(outputs_filter_gradvecs_2, outputs_filter_2_0b, results, stream);
     stage_filter_2_0b.record(stream);
 
-    TRY_CUDA(cudaMemsetAsync(buffer_late_init_flags.data, 0, sizeof(uint32_t) * KernelSeed1::threads_per_run, stream));
-    KernelSeed1::run_late<1>(outputs_filter_seeds, outputs_filter_2_0b, results, (uint32_t *)buffer_late_init_flags.data, stream);
+    KernelSeed1::run_late<2>(outputs_filter_seeds, outputs_filter_2_0b, results, (uint32_t *)buffer_late_init_flags.data, stream);
     stage_init_seeds_late_1.record(stream);
 
     {
@@ -2142,11 +2157,11 @@ void GpuThread::run() {
         filter.stage.record(stream);
 
         if (filter_index == 0) {
-          KernelSeed1::run_late<2>(outputs_filter_seeds, filter.outputs, results, (uint32_t *)buffer_late_init_flags.data, stream);
-        } else if (filter_index == 1) {
           KernelSeed1::run_late<3>(outputs_filter_seeds, filter.outputs, results, (uint32_t *)buffer_late_init_flags.data, stream);
-        } else if (filter_index == 2) {
+        } else if (filter_index == 1) {
           KernelSeed1::run_late<4>(outputs_filter_seeds, filter.outputs, results, (uint32_t *)buffer_late_init_flags.data, stream);
+        } else if (filter_index == 2) {
+          KernelSeed1::run_late<5>(outputs_filter_seeds, filter.outputs, results, (uint32_t *)buffer_late_init_flags.data, stream);
         }
 
         if (filter.late_stage != nullptr) {
