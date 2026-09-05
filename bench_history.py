@@ -24,7 +24,12 @@ the hard way on this project:
     sequentially, an optimisation here once appeared to be a regression. Every
     commit is built first, then one run of each is taken per round.
 
-  * The first rounds are discarded. Clocks settle after a run or two.
+  * The first rounds are discarded, and enough of them to reach thermal steady
+    state. This matters more than it sounds: on the card this was written for,
+    the same binary reads 26.4 ms/iteration cold and 30.2 ms/iteration hot, a
+    15% spread, as the clock throttles from 1328 MHz at 40C to 1164 MHz at 79C.
+    Warm-up is therefore counted in runs, not rounds, so a two-commit range
+    warms up as thoroughly as a twenty-commit one.
 
 Even so, two identical binaries can differ by around 1% run to run, so the
 chart prints a standard error beside each point. Treat differences smaller than
@@ -442,7 +447,10 @@ def main() -> int:
     ap.add_argument("-r", "--runs", type=int, default=4,
                     help="measured rounds per commit (default 4)")
     ap.add_argument("-w", "--warmup", type=int, default=2,
-                    help="leading rounds to discard (default 2)")
+                    help="minimum leading rounds to discard (default 2)")
+    ap.add_argument("--warmup-runs", type=int, default=10, metavar="R",
+                    help="discard at least this many runs in total, whatever the "
+                         "commit count, so the GPU reaches steady state (default 10)")
     ap.add_argument("-s", "--seed", default=None,
                     help="start seed (default: first entry of seeds.txt)")
     ap.add_argument("-p", "--print-interval", type=int, default=256,
@@ -531,10 +539,19 @@ def main() -> int:
         if len(buildable) < 2:
             sys.exit("fewer than two commits built; nothing to chart")
 
-        total_rounds = args.warmup + args.runs
+        # Warm up by runs, not rounds. A GPU reaching steady state is what makes
+        # the measured rounds comparable, and a short range would otherwise be
+        # timed cold: on this hardware the same binary reads 15% faster at 40C
+        # than at the 79C it settles to.
+        warmup_rounds = max(args.warmup,
+                            -(-args.warmup_runs // max(len(buildable), 1)))
+        if warmup_rounds != args.warmup:
+            print(f"  (warmup raised to {warmup_rounds} rounds = "
+                  f"{warmup_rounds * len(buildable)} runs, to reach steady state)")
+        total_rounds = warmup_rounds + args.runs
         print(f"\ntiming ({total_rounds} rounds x {len(buildable)} commits)")
         for rnd in range(1, total_rounds + 1):
-            measured = rnd > args.warmup
+            measured = rnd > warmup_rounds
             for c in buildable:
                 sink = Commit(c.sha, c.short, c.subject, c.binary)
                 target = c if measured else sink
@@ -557,6 +574,13 @@ def main() -> int:
                     verify_commit(repo, c, seeds_file, args.timeout * 4)
                     print(f"  {c.short}: {c.verified}/{c.verify_total}", flush=True)
 
+        gpu_note = ""
+        probe = run(["nvidia-smi", "--query-gpu=name,temperature.gpu,clocks.sm",
+                     "--format=csv,noheader"])
+        if probe.returncode == 0 and probe.stdout.strip():
+            gpu_note = probe.stdout.strip().splitlines()[0]
+            print(f"\ngpu at end of run: {gpu_note}")
+
         # ---- report ----
         live = [c for c in commits if c.ok]
         scanned = {c.seeds_scanned for c in live}
@@ -577,9 +601,11 @@ def main() -> int:
         meta = {
             "seed": seed,
             "PRINT_INTERVAL": args.print_interval,
-            "rounds": f"{args.runs} measured, {args.warmup} discarded",
+            "rounds": f"{args.runs} measured, {warmup_rounds} discarded",
             "protocol": "round-robin",
         }
+        if gpu_note:
+            meta["gpu at finish"] = gpu_note
         (out / "chart.svg").write_text(svg)
         (out / "chart.html").write_text(build_html(commits, svg, meta))
         with (out / "results.csv").open("w", newline="") as fh:
@@ -594,7 +620,8 @@ def main() -> int:
                             "" if c.verified is None else c.verified])
         (out / "results.json").write_text(json.dumps(
             {"seed": seed, "print_interval": args.print_interval,
-             "warmup": args.warmup, "runs": args.runs,
+             "warmup_rounds": warmup_rounds, "runs": args.runs,
+             "gpu": gpu_note,
              "commits": [{"sha": c.sha, "short": c.short, "subject": c.subject,
                           "ms_per_iter": None if not c.ok else c.mean,
                           "stderr": c.stderr, "samples": c.runs,
