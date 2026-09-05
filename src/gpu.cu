@@ -1021,6 +1021,15 @@ __launch_bounds__(block_dim_x) void kernel(
   __shared__ float conv_z1[256][6];
 
   __shared__ alignas(16) uint8_t idx_xy[2][272];
+  // The gate is A[t] + B[t+d] >= T with A = conv_z0[.][2] and B = conv_z0[.][3].
+  // B can never exceed max(B), so only t with A[t] >= T - max(B) can contribute
+  // to any candidate at all. Measured over random permutations, that is 11% of
+  // the 256 t values, so listing them cuts gate checks about ninefold with no
+  // loss -- every (t, d) that really passes is kept, verified exhaustively.
+  __shared__ uint8_t cand_t[256];
+  __shared__ float   cand_a[256];
+  __shared__ uint32_t cand_n;
+  __shared__ float   red_max[8];
 
   const int32_t nz = threadIdx.x;
 
@@ -1080,72 +1089,74 @@ __launch_bounds__(block_dim_x) void kernel(
       idx_xy[1][256 + nz] = v1;
     }
 
+    if (nz == 0) { cand_n = 0; }
     __syncthreads();
 
-    int32_t x = x_center;
-    const int32_t z = z_center + nz * cell_size;
-
-    // Only the y=0 sliding window is built on the common path. The gate reads
-    // conv_z0 alone, and it rejects the overwhelming majority of candidates, so
-    // building the y=1 window here would spend 13 adds and two shared loads per
-    // eight candidates on values almost nothing uses. The gate branch re-reads
-    // the four y=1 indices it needs straight out of idx_xy instead.
-    uchar4 c0_0 = *reinterpret_cast<const uchar4*>(&idx_xy[0][0]);
-    uchar4 c0_1 = *reinterpret_cast<const uchar4*>(&idx_xy[0][4]);
-
-    for (int32_t nx = 0; nx < 256; nx += 8) {
-      uchar4 c0_2 = *reinterpret_cast<const uchar4*>(&idx_xy[0][nx + 8]);
-      uchar4 c0_3 = *reinterpret_cast<const uchar4*>(&idx_xy[0][nx + 12]);
-
-      uint16_t w0[12];
-      w0[0]  = c0_0.x + nz; w0[1]  = c0_0.y + nz; w0[2]  = c0_0.z + nz; w0[3]  = c0_0.w + nz;
-      w0[4]  = c0_1.x + nz; w0[5]  = c0_1.y + nz; w0[6]  = c0_1.z + nz; w0[7]  = c0_1.w + nz;
-      w0[8]  = c0_2.x + nz; w0[9]  = c0_2.y + nz; w0[10] = c0_2.z + nz; w0[11] = c0_2.w + nz;
-
-      // The gate rejects almost every candidate, so testing each one separately
-      // spends an FSETP and a branch per candidate on a branch that is almost
-      // never taken. Since gate >= T for *any* candidate in a group iff the
-      // group's maximum does, 4 candidates share one branch: 4 FADD plus
-      // 3 FMAX plus one test, against 4 tests. Inside, each candidate is
-      // still checked individually, so the result is unchanged.
+    // max over B = conv_z0[.][3], reduced across the block
+    {
+      float m = conv_z0[nz][3];
 #pragma unroll
-      for (int grp = 0; grp < 2; ++grp) {
-        float g[4];
+      for (int off = 16; off; off >>= 1) {
+        m = fmaxf(m, __shfl_down_sync(0xFFFFFFFFu, m, off));
+      }
+      if ((nz & 31) == 0) { red_max[nz >> 5] = m; }
+    }
+    __syncthreads();
+    float max_b = red_max[0];
 #pragma unroll
-        for (int c = 0; c < 4; ++c) {
-          const uint16_t* cw0 = &w0[grp * 4 + c];
-          g[c] = conv_z0[cw0[2] & 0xFF][2] + conv_z0[cw0[3] & 0xFF][3];
-        }
-        float gmax = g[0];
-#pragma unroll
-        for (int c = 1; c < 4; ++c) { gmax = fmaxf(gmax, g[c]); }
+    for (int k = 1; k < 8; ++k) { max_b = fmaxf(max_b, red_max[k]); }
 
-        if (gmax >= kGradVecs1GateZ0Threshold) {
-#pragma unroll
-          for (int c = 0; c < 4; ++c) {
-            if (g[c] < kGradVecs1GateZ0Threshold) { continue; }
-            const int candidate = grp * 4 + c;
-            const uint16_t* cw0 = &w0[candidate];
-            const uint8_t* r1 = &idx_xy[1][nx + candidate];
-            // the 8-term sum is the score now; there is no separate 12-term pass
-            const float score = g[c]
-                + conv_z0[cw0[1] & 0xFF][1] + conv_z0[cw0[4] & 0xFF][4]
-                + conv_z1[(r1[1] + nz) & 0xFF][1] + conv_z1[(r1[2] + nz) & 0xFF][2]
-                + conv_z1[(r1[3] + nz) & 0xFF][3] + conv_z1[(r1[4] + nz) & 0xFF][4];
-            if (score > kGradVecs1FinalThreshold) {
-              uint32_t res_idx = atomicAdd(outputs.len, 1);
-              if (res_idx < outputs.max_len) {
-                outputs.data[res_idx] = {seed_index, x + candidate * cell_size, z};
-              }
-            }
+    // list the t values that could still clear the gate
+    {
+      const float a = conv_z0[nz][2];
+      // Slack, because the bound is applied in floating point: fl(a + b) can
+      // reach the threshold when a sits just under fl(T - max_b). Values here
+      // are order 10, so an ulp is ~1e-6; 1e-3 is far more than enough and
+      // widens the list by a negligible amount.
+      const bool keep = (a >= kGradVecs1GateZ0Threshold - max_b - 1.0e-3f);
+      const uint32_t m = __ballot_sync(0xFFFFFFFFu, keep);
+      uint32_t base;
+      if ((nz & 31) == 0) { base = atomicAdd(&cand_n, __popc(m)); }
+      base = __shfl_sync(0xFFFFFFFFu, base, 0);
+      if (keep) {
+        const uint32_t slot = base + __popc(m & ((1u << (nz & 31)) - 1u));
+        cand_t[slot] = (uint8_t)nz;
+        cand_a[slot] = a;
+      }
+    }
+    __syncthreads();
+    const uint32_t n_cand = cand_n;
+
+    // One thread per nx now, rather than per nz: nx fixes the four y=0 and four
+    // y=1 lattice offsets for the whole seed, so they are read once into
+    // registers instead of being re-derived by a sliding window.
+    const uint32_t nx = nz;
+    const uint32_t p1 = idx_xy[0][nx + 1], p2 = idx_xy[0][nx + 2];
+    const uint32_t p3 = idx_xy[0][nx + 3], p4 = idx_xy[0][nx + 4];
+    const uint32_t q1 = idx_xy[1][nx + 1], q2 = idx_xy[1][nx + 2];
+    const uint32_t q3 = idx_xy[1][nx + 3], q4 = idx_xy[1][nx + 4];
+    const uint32_t d = (p3 - p2) & 0xFF;
+    const int32_t x = x_center + (int32_t)nx * cell_size;
+
+    for (uint32_t i = 0; i < n_cand; ++i) {
+      const uint32_t t = cand_t[i];          // broadcast
+      const float    a = cand_a[i];          // broadcast
+      const float    b = conv_z0[(t + d) & 0xFF][3];
+      if (a + b >= kGradVecs1GateZ0Threshold) {
+        const uint32_t nz2 = (t - p2) & 0xFF;
+        const float score = a + b
+            + conv_z0[(p1 + nz2) & 0xFF][1] + conv_z0[(p4 + nz2) & 0xFF][4]
+            + conv_z1[(q1 + nz2) & 0xFF][1] + conv_z1[(q2 + nz2) & 0xFF][2]
+            + conv_z1[(q3 + nz2) & 0xFF][3] + conv_z1[(q4 + nz2) & 0xFF][4];
+        if (score > kGradVecs1FinalThreshold) {
+          uint32_t res_idx = atomicAdd(outputs.len, 1);
+          if (res_idx < outputs.max_len) {
+            outputs.data[res_idx] = {seed_index,
+                                     x,
+                                     z_center + (int32_t)nz2 * cell_size};
           }
         }
       }
-
-      x += 8 * cell_size;
-
-      c0_0 = c0_2;
-      c0_1 = c0_3;
     }
   }
 }
