@@ -394,11 +394,34 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   //
   // Tightening buys raw throughput (9.1 vs 5.3 Gseed/s at 0.030) but drops more
   // yield than it gains speed, so it is a net loss for a search that runs
-  // continuously. Loosening is capped from the other side: buffer_seeds holds
-  // only KernelSeed1::threads_per_run (65536) survivors per iteration, and at
-  // 0.045 the survivor count pins exactly to that ceiling - the excess is
-  // silently dropped by the bounds check in KernelFilterSeeds. 0.038 runs at
-  // about 65% of that capacity.
+  // continuously.
+  //
+  // The other side of that sweep was measured against a ceiling. buffer_seeds
+  // held only KernelSeed1::threads_per_run survivors an iteration, 65536 at the
+  // time, and 0.042 pinned exactly to it while 0.045 pinned harder, so the loose
+  // end of the table had its yield truncated. With the ceiling now at 1<<17 the
+  // sweep was rerun with PRINT_INTERVAL 1024 for Poisson headroom, three rounds
+  // of a round-robin, quoting discovery rate against 0.038:
+  //
+  //   maxScore  surv/iter  %cap    filter_2a      filter_2b      filter_2c
+  //   0.038         42706  32.6%        -              -              -
+  //   0.040         55126  42.1%   +9.2% (+-0.5)  +7.2% (+-1.8)  -1.9% (+-9.0)
+  //   0.043         78966  60.2%  +19.8% (+-0.5) +14.5% (+-1.7)  -1.6% (+-8.6)
+  //   0.046        110490  84.3%  +26.4% (+-0.5) +19.8% (+-1.6) +10.1% (+-8.1)
+  //
+  // So the rate climbs monotonically well past 0.038, and 0.038 was never the
+  // real optimum -- it was the point where the ceiling started eating the gain.
+  // The catch is that this is bought with wall time: 0.046 takes 243 s against
+  // 140 s to scan the same seeds, so it is 73% slower per iteration for roughly
+  // 20% more deep candidates per second. Which of those matters is a policy call
+  // about how the search is run, not a kernel question, so the value is left at
+  // 0.038 and the measurement recorded here for whoever makes that call.
+  //
+  // Note the gain shrinks with depth (+26.4% -> +19.8% -> +10.1%) because looser
+  // seeds convert worse at every stage; filter_2c and filter_2d counts are too
+  // small to resolve the last of it. Loosening does not recover the three
+  // reference seeds lost at the gradvecs_1 gate -- verify_seeds.py reports 7 of
+  // 10 at both 0.038 and 0.046.
   constexpr float maxScore = 0.038f;
 
   uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -466,7 +489,20 @@ struct SeedPos {
 };
 
 namespace KernelSeed1 {
-constexpr uint32_t threads_per_run = UINT64_C(1) << 16;
+// The per-iteration survivor ceiling for the whole pipeline. It sizes
+// buffer_seeds, buffer_results and buffer_late_init_flags, and KernelFilterSeeds
+// silently drops every survivor past it.
+//
+// Raising it is close to free: this kernel early-exits whole blocks past
+// *input.len, so its cost tracks the real survivor count rather than the cap.
+// The only real price is buffer_results at sizeof(Result) = 4896 bytes a slot,
+// 321 MB at 1<<16 against 641 MB at 1<<17, on a 12 GB card.
+//
+// It is raised because at 1<<16 the ceiling was quietly distorting the maxScore
+// tuning above: 0.042 pinned at exactly 65536 survivors an iteration and 0.045
+// pinned harder, so both had their yield truncated and their discovery rate
+// understated, which is what made 0.038 look like the peak.
+constexpr uint32_t threads_per_run = UINT64_C(1) << 17;
 constexpr uint32_t threads_per_block = 32;
 
 struct Result {
