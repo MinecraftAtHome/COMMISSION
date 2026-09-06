@@ -1266,7 +1266,11 @@ void run(
     const KernelSeed1::Result* __restrict__ results,
     cudaStream_t stream)
 {
-  kernel<<<2048, block_dim_x, 0, stream>>>(seeds, outputs, results);
+  // 4096 blocks rather than 2048: with 5 blocks per SM resident this deepens
+  // the queue of work available to hide the per-seed global load and the
+  // barriers around the convolution build. Measured -1.9% on this stage; 8192
+  // measures the same and 1024 is 2.7% worse.
+  kernel<<<4096, block_dim_x, 0, stream>>>(seeds, outputs, results);
   TRY_CUDA(cudaGetLastError());
 }
 } // namespace KernelFilterGradVecs1
