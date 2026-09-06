@@ -435,47 +435,31 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   // yield than it gains speed, so it is a net loss for a search that runs
   // continuously.
   //
-  // The other side of that sweep was measured against a ceiling. buffer_seeds
-  // held only KernelSeed1::threads_per_run survivors an iteration, 65536 at the
-  // time, and 0.042 pinned exactly to it while 0.045 pinned harder, so the loose
-  // end of the table had its yield truncated. With the ceiling now at 1<<17 the
-  // sweep was rerun with PRINT_INTERVAL 1024 for Poisson headroom, three rounds
-  // of a round-robin, quoting discovery rate against 0.038:
+  // Loosening is the profitable direction, and by more than it first appeared.
+  // filter_seeds costs the same whatever this value is -- every seed is hashed
+  // before any threshold can reject it -- so an extra survivor costs only the
+  // downstream work. Both earlier sweeps were also measured against a survivor
+  // ceiling that silently truncated the loose end.
   //
-  //   maxScore  surv/iter  %cap    filter_2a      filter_2b      filter_2c
-  //   0.038         42706  32.6%        -              -              -
-  //   0.040         55126  42.1%   +9.2% (+-0.5)  +7.2% (+-1.8)  -1.9% (+-9.0)
-  //   0.043         78966  60.2%  +19.8% (+-0.5) +14.5% (+-1.7)  -1.6% (+-8.6)
-  //   0.046        110490  84.3%  +26.4% (+-0.5) +19.8% (+-1.6) +10.1% (+-8.1)
+  // Reswept with the ceiling at 1<<19 and PRINT_INTERVAL 512, three rounds of a
+  // round-robin, quoting discovery rate (finds per wall second) against 0.038:
   //
-  // So the rate climbs monotonically well past 0.038, and 0.038 was never the
-  // real optimum -- it was the point where the ceiling started eating the gain.
-  // The catch is that this is bought with wall time: 0.046 takes 243 s against
-  // 140 s to scan the same seeds, so it is 73% slower per iteration for roughly
-  // 20% more deep candidates per second. Which of those matters is a policy call
-  // about how the search is run, not a kernel question, so the value is left at
-  // 0.038 and the measurement recorded here for whoever makes that call.
+  //   maxScore  ms/iter  surv/iter  %cap    filter_2a       filter_2b       filter_2c
+  //   0.038       30.52      42709   8.1%       -               -               -
+  //   0.046       46.77     110497  21.1%  +43.0% (+-0.6)  +34.7% (+-2.3)  +24.5% (+-10.9)
+  //   0.054       77.45     247008  47.1%  +56.4% (+-0.6)  +40.9% (+-2.1)  +19.2% (+-10.2)
+  //   0.062      132.09     495352  94.5%  +45.6% (+-0.6)  +26.4% (+-2.0)   -6.5% (+- 9.8)
   //
-  // Note the gain shrinks with depth (+26.4% -> +19.8% -> +10.1%) because looser
-  // seeds convert worse at every stage; filter_2c and filter_2d counts are too
-  // small to resolve the last of it. Loosening does not recover the three
-  // reference seeds lost at the gradvecs_1 gate -- verify_seeds.py reports 7 of
-  // 10 at both 0.038 and 0.046.
-  // Both stacks earn their place here, which is not obvious: reaching the B
-  // stack costs an entire extra fork, and it is the only reason the drain has to
-  // carry the rng state at all. Dropping it was built and measured. Scoring only
-  // the three A octaves, with the threshold retuned by simulation to 0.00488 so
-  // the survivor count matches, makes this stage 15.3% faster and the whole run
-  // 8.1% faster -- 29.888 to 27.460 ms/iter -- and drops the block to 12288
-  // bytes of shared, doubling occupancy from 4 blocks per SM to 8.
+  // There is a real peak: 0.062 is past it at every stage. 0.054 is the choice --
+  // about 41% more finds a second than 0.038, for 2.5x the wall time an
+  // iteration, and verify_seeds.py still reports the same 7 of 10 reference
+  // seeds. ms/iteration gets worse; islands per hour, which is what the search
+  // is for, gets substantially better.
   //
-  // It also destroys the search. filter_2b falls from 473 outputs to 37,
-  // filter_2c from 24 to 1, the run finds nothing at all, and verify_seeds.py
-  // drops from 7 of 10 reference seeds to 1. Continentalness is the sum of the
-  // two stacks, so selecting on A's octave offsets alone lets through seeds
-  // whose B half is hopeless. Eight percent of speed for roughly thirteen times
-  // less yield is not a trade worth having.
-  constexpr float maxScore = 0.038f;
+  // Note this inverts the optimisation target. At 0.038 filter_seeds was 64.7%
+  // of the run and effectively at its floor; at 0.054 it is 27.6%, while
+  // gradvecs_1 (34.5%) and filter_2_01a (24.4%) carry 59% between them.
+  constexpr float maxScore = 0.054f;
 
   // Stack-A accumulator only: with the run 32-aligned, s = S0 ^ j, so the input
   // to mix64(s)'s first multiply is X0 ^ j = P1 + r for r = (X0 & 31) ^ j.
@@ -642,7 +626,7 @@ namespace KernelSeed1 {
 // tuning above: 0.042 pinned at exactly 65536 survivors an iteration and 0.045
 // pinned harder, so both had their yield truncated and their discovery rate
 // understated, which is what made 0.038 look like the peak.
-constexpr uint32_t threads_per_run = UINT64_C(1) << 17;
+constexpr uint32_t threads_per_run = UINT64_C(1) << 19;
 constexpr uint32_t threads_per_block = 32;
 
 struct Result {
