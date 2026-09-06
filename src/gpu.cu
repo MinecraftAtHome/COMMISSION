@@ -1671,6 +1671,23 @@ __device__ inline void compute_cell(const ImprovedNoise &noise, int32_t int_x, i
   c111 = noise.p[(p11 + int_z + 1) & 0xFF];
 }
 
+// The per-sample work here is already hoisted as far as it goes: the y and z
+// setup is computed once per candidate, the eight corner indices are cached
+// across consecutive x samples so compute_cell's twelve lookups only rerun when
+// the lattice cell changes, and the noise structs are staged per warp.  What is
+// left is this function -- eight gradient dots and the trilinear blend, about 62
+// of the roughly 70 operations a sample costs.
+//
+// One further step was tried and rejected. gradDot spends a multiply on
+// y * table.y[hash] for each of the eight corners, and y is only ever frac_y or
+// frac_y - 1, both fixed for the whole candidate because this kernel samples at
+// y = 0. Pre-scaling the gradient's y component into two 16-entry shared tables
+// per octave turns each corner from two FMAs and a multiply into two FMAs.
+// Measured over six round-robin runs it came out 1.8% slower on this stage: it
+// trades an FMA for a shared load, and on Maxwell that is not a trade worth
+// making. It would also give up exactness in principle -- the original folds
+// y * gy inside an FMA and never rounds it alone -- though as it happened every
+// stage output was unchanged.
 __device__ inline float interp(const GradDotTable &table, float frac_x, float frac_y, float frac_z, float fx, float fy, float fz, uint8_t c000, uint8_t c100, uint8_t c010, uint8_t c110, uint8_t c001, uint8_t c101, uint8_t c011, uint8_t c111) {
   float n000 = gradDot(table, c000, frac_x, frac_y, frac_z);
   float n100 = gradDot(table, c100, frac_x - 1.0f, frac_y, frac_z);
