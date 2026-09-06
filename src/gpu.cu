@@ -1083,6 +1083,14 @@ __launch_bounds__(block_dim_x) void kernel(
   __shared__ uint8_t cand_t[256];
   __shared__ float   cand_a[256];
   __shared__ uint32_t cand_n;
+  // Queue of gate survivors awaiting their score, one per warp. The gate lets
+  // roughly 166 of a seed's 65536 positions through, scattered across the scan,
+  // so a warp reaching the score path carries less than one live lane on
+  // average -- measured, the score path is 69% of this kernel while the scan
+  // that feeds it is 1%. Staging the survivors and draining 32 at a time runs
+  // that work at full width instead. Depth 64: a drain leaves at most 31 behind
+  // and the next round can add 32.
+  __shared__ uint32_t score_q[block_dim_x / 32][64];
   __shared__ float   red_max[8];
 
   const int32_t nz = threadIdx.x;
@@ -1185,6 +1193,7 @@ __launch_bounds__(block_dim_x) void kernel(
     // y=1 lattice offsets for the whole seed, so they are read once into
     // registers instead of being re-derived by a sliding window.
     const uint32_t nx = nz;
+    const uint32_t warp = nz >> 5, lane = nz & 31;
     const uint32_t p1 = idx_xy[0][nx + 1], p2 = idx_xy[0][nx + 2];
     const uint32_t p3 = idx_xy[0][nx + 3], p4 = idx_xy[0][nx + 4];
     const uint32_t q1 = idx_xy[1][nx + 1], q2 = idx_xy[1][nx + 2];
@@ -1192,26 +1201,64 @@ __launch_bounds__(block_dim_x) void kernel(
     const uint32_t d = (p3 - p2) & 0xFF;
     const int32_t x = x_center + (int32_t)nx * cell_size;
 
+#define OMISSION_SCORE_DRAIN(ACTIVE)                                             \
+    {                                                                            \
+      const uint32_t act_ = (ACTIVE);                                            \
+      if (lane < act_) {                                                         \
+        const uint32_t e_ = score_q[warp][lane];                                 \
+        const uint32_t nxv = e_ >> 8, t_ = e_ & 0xFFu;                           \
+        const uint32_t r1 = idx_xy[0][nxv + 1], r2 = idx_xy[0][nxv + 2];         \
+        const uint32_t r3 = idx_xy[0][nxv + 3], r4 = idx_xy[0][nxv + 4];         \
+        const uint32_t s1 = idx_xy[1][nxv + 1], s2 = idx_xy[1][nxv + 2];         \
+        const uint32_t s3 = idx_xy[1][nxv + 3], s4 = idx_xy[1][nxv + 4];         \
+        const uint32_t nzv = (t_ - r2) & 0xFF;                                   \
+        const float sc = (conv_z0[(r2 + nzv) & 0xFF][1]                         \
+                        + conv_z0[(r3 + nzv) & 0xFF][2])                        \
+                       + conv_z0[(r1 + nzv) & 0xFF][0]                          \
+                       + conv_z0[(r4 + nzv) & 0xFF][3]                          \
+                       + conv_z1[(s1 + nzv) & 0xFF][0]                          \
+                       + conv_z1[(s2 + nzv) & 0xFF][1]                          \
+                       + conv_z1[(s3 + nzv) & 0xFF][2]                          \
+                       + conv_z1[(s4 + nzv) & 0xFF][3];                          \
+        if (sc > kGradVecs1FinalThreshold) {                                     \
+          uint32_t ri_ = atomicAdd(outputs.len, 1);                              \
+          if (ri_ < outputs.max_len) {                                           \
+            outputs.data[ri_] = {seed_index,                                     \
+                                 x_center + (int32_t)nxv * cell_size,            \
+                                 z_center + (int32_t)nzv * cell_size};           \
+          }                                                                      \
+        }                                                                        \
+      }                                                                          \
+    }
+
+    uint32_t sq_n = 0;   // uniform across the warp
     for (uint32_t i = 0; i < n_cand; ++i) {
       const uint32_t t = cand_t[i];          // broadcast
       const float    a = cand_a[i];          // broadcast
       const float    b = conv_z0[(t + d) & 0xFF][2];
-      if (a + b >= kGradVecs1GateZ0Threshold) {
-        const uint32_t nz2 = (t - p2) & 0xFF;
-        const float score = a + b
-            + conv_z0[(p1 + nz2) & 0xFF][0] + conv_z0[(p4 + nz2) & 0xFF][3]
-            + conv_z1[(q1 + nz2) & 0xFF][0] + conv_z1[(q2 + nz2) & 0xFF][1]
-            + conv_z1[(q3 + nz2) & 0xFF][2] + conv_z1[(q4 + nz2) & 0xFF][3];
-        if (score > kGradVecs1FinalThreshold) {
-          uint32_t res_idx = atomicAdd(outputs.len, 1);
-          if (res_idx < outputs.max_len) {
-            outputs.data[res_idx] = {seed_index,
-                                     x,
-                                     z_center + (int32_t)nz2 * cell_size};
-          }
-        }
+      const bool hit = (a + b >= kGradVecs1GateZ0Threshold);
+
+      const uint32_t m = __ballot_sync(0xFFFFFFFFu, hit);
+      if (hit) {
+        score_q[warp][sq_n + __popc(m & ((1u << lane) - 1u))] = (nx << 8) | t;
+      }
+      sq_n += __popc(m);
+
+      if (sq_n >= 32u) {
+        __syncwarp();
+        OMISSION_SCORE_DRAIN(32u)
+        __syncwarp();
+        sq_n -= 32u;
+        if (lane < sq_n) { score_q[warp][lane] = score_q[warp][lane + 32]; }
+        __syncwarp();
       }
     }
+
+    if (sq_n != 0u) {
+      __syncwarp();
+      OMISSION_SCORE_DRAIN(sq_n)
+    }
+#undef OMISSION_SCORE_DRAIN
   }
 }
 
