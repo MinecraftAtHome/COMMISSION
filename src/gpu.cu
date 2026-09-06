@@ -1673,6 +1673,51 @@ __device__ inline void compute_cell(const ImprovedNoise &noise, int32_t int_x, i
   c111 = noise.p[(p11 + int_z + 1) & 0xFF];
 }
 
+// Perlin's 8-corner gradient dot is affine in dx, and lerp3 nests the fx lerp
+// innermost, so for one cell the whole interpolation collapses to
+//     result = pa + fx * (qa - pa),  pa = frac_x * ga + ba,  qa = frac_x * gb + bb
+// where ga/ba/gb/bb depend only on the cell's eight hashes and the y/z fractions.
+// Those are loop-invariant for every sample landing in the same x cell, so a
+// sample costs 4 FMAs and no shared-memory reads instead of 24 table reads and
+// ~38 flops. Algebraically identical to gradDot + lerp3; the reassociation does
+// change float rounding in the last bits, so results are not bit-identical.
+__device__ inline void cell_coeffs(const GradDotTable &table, const ImprovedNoise &noise,
+                                   int32_t int_x, int32_t int_y, int32_t int_z,
+                                   float frac_y, float frac_z, float fy, float fz,
+                                   float &ga, float &ba, float &gb, float &bb) {
+  uint8_t c000, c100, c010, c110, c001, c101, c011, c111;
+  compute_cell(noise, int_x, int_y, int_z, c000, c100, c010, c110, c001, c101, c011, c111);
+
+  const float dy0 = frac_y;
+  const float dy1 = frac_y - 1.0f;
+  const float dz0 = frac_z;
+  const float dz1 = frac_z - 1.0f;
+
+  const uint32_t h000 = c000 & 0xF, h100 = c100 & 0xF, h010 = c010 & 0xF, h110 = c110 & 0xF;
+  const uint32_t h001 = c001 & 0xF, h101 = c101 & 0xF, h011 = c011 & 0xF, h111 = c111 & 0xF;
+
+  const float b000 = fmaf(dy0, table.y[h000], dz0 * table.z[h000]);
+  const float b100 = fmaf(dy0, table.y[h100], dz0 * table.z[h100]);
+  const float b010 = fmaf(dy1, table.y[h010], dz0 * table.z[h010]);
+  const float b110 = fmaf(dy1, table.y[h110], dz0 * table.z[h110]);
+  const float b001 = fmaf(dy0, table.y[h001], dz1 * table.z[h001]);
+  const float b101 = fmaf(dy0, table.y[h101], dz1 * table.z[h101]);
+  const float b011 = fmaf(dy1, table.y[h011], dz1 * table.z[h011]);
+  const float b111 = fmaf(dy1, table.y[h111], dz1 * table.z[h111]);
+
+  // lerp2's first weight walks j (fy), its second walks k (fz).
+  ga = lerp2(fy, fz, table.x[h000], table.x[h010], table.x[h001], table.x[h011]);
+  ba = lerp2(fy, fz, b000, b010, b001, b011);
+  gb = lerp2(fy, fz, table.x[h100], table.x[h110], table.x[h101], table.x[h111]);
+  bb = lerp2(fy, fz, b100, b110, b101, b111);
+}
+
+__forceinline__ __device__ float cell_sample(float frac_x, float fx, float ga, float ba, float gb, float bb) {
+  const float pa = fmaf(frac_x, ga, ba);
+  const float qa = fmaf(frac_x - 1.0f, gb, bb);
+  return fmaf(fx, qa - pa, pa);
+}
+
 // The per-sample work here is already hoisted as far as it goes: the y and z
 // setup is computed once per candidate, the eight corner indices are cached
 // across consecutive x samples so compute_cell's twelve lookups only rerun when
@@ -1767,8 +1812,8 @@ __global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<SeedPos>
     int32_t cur_ix1 = 0;
     bool have0 = false;
     bool have1 = false;
-    uint8_t a000, a100, a010, a110, a001, a101, a011, a111;
-    uint8_t b000, b100, b010, b110, b001, b101, b011, b111;
+    float a_ga, a_ba, a_gb, a_bb;
+    float b_ga, b_ba, b_gb, b_bb;
 
     uint32_t local_count = 0;
 #pragma unroll
@@ -1779,23 +1824,23 @@ __global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<SeedPos>
       const int32_t int_x0 = __float2int_rd(x0c);
       const float frac_x0 = x0c - (float)int_x0;
       if (!have0 || int_x0 != cur_ix0) {
-        compute_cell(oct0, int_x0, int_y0, int_z0, a000, a100, a010, a110, a001, a101, a011, a111);
+        cell_coeffs(shared_grad_dot_table, oct0, int_x0, int_y0, int_z0, frac_y0, frac_z0, fy0, fz0, a_ga, a_ba, a_gb, a_bb);
         cur_ix0 = int_x0;
         have0 = true;
       }
       const float fx0 = smoothstep(frac_x0);
-      const float noise0 = interp(shared_grad_dot_table, frac_x0, frac_y0, frac_z0, fx0, fy0, fz0, a000, a100, a010, a110, a001, a101, a011, a111);
+      const float noise0 = cell_sample(frac_x0, fx0, a_ga, a_ba, a_gb, a_bb);
 
       const float x1c = x_world * if1 + oct1.xo;
       const int32_t int_x1 = __float2int_rd(x1c);
       const float frac_x1 = x1c - (float)int_x1;
       if (!have1 || int_x1 != cur_ix1) {
-        compute_cell(oct1, int_x1, int_y1, int_z1, b000, b100, b010, b110, b001, b101, b011, b111);
+        cell_coeffs(shared_grad_dot_table, oct1, int_x1, int_y1, int_z1, frac_y1, frac_z1, fy1, fz1, b_ga, b_ba, b_gb, b_bb);
         cur_ix1 = int_x1;
         have1 = true;
       }
       const float fx1 = smoothstep(frac_x1);
-      const float noise1 = interp(shared_grad_dot_table, frac_x1, frac_y1, frac_z1, fx1, fy1, fz1, b000, b100, b010, b110, b001, b101, b011, b111);
+      const float noise1 = cell_sample(frac_x1, fx1, b_ga, b_ba, b_gb, b_bb);
 
       float val = 0;
       val += noise0 * vf0;
