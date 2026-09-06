@@ -461,6 +461,20 @@ __global__ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed,
   // small to resolve the last of it. Loosening does not recover the three
   // reference seeds lost at the gradvecs_1 gate -- verify_seeds.py reports 7 of
   // 10 at both 0.038 and 0.046.
+  // Both stacks earn their place here, which is not obvious: reaching the B
+  // stack costs an entire extra fork, and it is the only reason the drain has to
+  // carry the rng state at all. Dropping it was built and measured. Scoring only
+  // the three A octaves, with the threshold retuned by simulation to 0.00488 so
+  // the survivor count matches, makes this stage 15.3% faster and the whole run
+  // 8.1% faster -- 29.888 to 27.460 ms/iter -- and drops the block to 12288
+  // bytes of shared, doubling occupancy from 4 blocks per SM to 8.
+  //
+  // It also destroys the search. filter_2b falls from 473 outputs to 37,
+  // filter_2c from 24 to 1, the run finds nothing at all, and verify_seeds.py
+  // drops from 7 of 10 reference seeds to 1. Continentalness is the sum of the
+  // two stacks, so selecting on A's octave offsets alone lets through seeds
+  // whose B half is hopeless. Eight percent of speed for roughly thirteen times
+  // less yield is not a trade worth having.
   constexpr float maxScore = 0.038f;
 
   // Stack-A accumulator only: with the run 32-aligned, s = S0 ^ j, so the input
