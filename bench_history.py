@@ -4,14 +4,27 @@
 Builds every commit from HEAD~N to HEAD, times each one with --benchmark, and
 writes an SVG/HTML chart of milliseconds per search iteration.
 
-    ./bench_history.py -n 13                  # HEAD~13 .. HEAD
+    ./bench_history.py --from a1b2c3d         # that commit through HEAD
+    ./bench_history.py --from v1.2 --verify   # any revision git understands
+    ./bench_history.py -n 13                  # or count back: HEAD~13 .. HEAD
     ./bench_history.py -n 5 --runs 6          # more samples per commit
-    ./bench_history.py -n 5 --verify          # also chart seeds found
     ./bench_history.py -n 5 --arch sm_75      # pass ARCH= through to make
+
+--from takes anything git resolves -- a hash of any length, a tag, a branch, or
+HEAD~7 -- and works out the range itself. If the commit is not an ancestor of
+HEAD the two histories have diverged, so it falls back to their merge base and
+says so, since walking "backwards" to a sibling branch would not make a sensible
+progress chart.
 
 Nothing outside the output directory is touched: the commits are built in a
 temporary git worktree, so the working tree, the index and the current branch
 are all left exactly as they were, even on Ctrl-C.
+
+Commits are built in parallel, each worker in its own git worktree, so a long
+range does not mean a long wait. Worktrees share the object store, so N of them
+cost N working trees on disk rather than N clones. --build-workers sets the
+count; each one runs a full nvcc, which is memory-hungry, so the default is
+deliberately modest.
 
 Only the standard library is used, so the chart renders anywhere Python does --
 no matplotlib, no numpy.
@@ -40,6 +53,7 @@ them.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import math
@@ -48,8 +62,10 @@ import re
 import shutil
 import statistics
 import subprocess
+import queue
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,6 +113,7 @@ class Commit:
 
     @property
     def stderr(self) -> float:
+        # One sample has an unknown error, not a zero one; callers show a dash.
         if len(self.runs) < 2:
             return 0.0
         return statistics.stdev(self.runs) / math.sqrt(len(self.runs))
@@ -116,19 +133,63 @@ def git(repo: Path, *args: str) -> str:
     return r.stdout.strip()
 
 
-def resolve_commits(repo: Path, n: int) -> list[Commit]:
-    """The N+1 commits from HEAD~N through HEAD, oldest first."""
-    out = git(repo, "rev-list", "--reverse", f"--max-count={n + 1}", "HEAD")
-    shas = out.split()
+def _rev_list(repo: Path, spec: list[str], first_parent: bool) -> list[str]:
+    args = ["rev-list", "--reverse"] + (["--first-parent"] if first_parent else [])
+    return git(repo, *args, *spec).split()
+
+
+def resolve_commits(repo: Path, n: int | None, from_commit: str | None,
+                    first_parent: bool, max_commits: int) -> list[Commit]:
+    """The commits to chart, oldest first.
+
+    Either the last N+1 commits, or everything from `from_commit` through HEAD.
+    """
+    head = git(repo, "rev-parse", "HEAD")
+
+    if from_commit:
+        probe = run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                     f"{from_commit}^{{commit}}"])
+        if probe.returncode != 0 or not probe.stdout.strip():
+            sys.exit(f"cannot resolve {from_commit!r} to a commit in {repo}")
+        start = probe.stdout.strip()
+
+        if start == head:
+            sys.exit("--from is HEAD itself; there is nothing to compare it against")
+
+        ancestor = run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                        start, "HEAD"]).returncode == 0
+        if not ancestor:
+            base = git(repo, "merge-base", start, "HEAD")
+            ahead = len(_rev_list(repo, [f"{base}..{start}"], False))
+            short_s = git(repo, "rev-parse", "--short", start)
+            short_b = git(repo, "rev-parse", "--short", base)
+            print(f"  note: {short_s} is not an ancestor of HEAD -- the histories "
+                  f"diverged {ahead} commit(s) ago.")
+            print(f"        charting from their merge base {short_b} instead.")
+            start = base
+            if start == head:
+                sys.exit("the merge base is HEAD; nothing to chart")
+
+        shas = [start] + _rev_list(repo, [f"{start}..HEAD"], first_parent)
+    else:
+        shas = _rev_list(repo, [f"--max-count={n + 1}", "HEAD"], first_parent)
+
     if len(shas) < 2:
         sys.exit(f"need at least two commits to chart; found {len(shas)}")
-    if len(shas) < n + 1:
+    if n is not None and len(shas) < n + 1:
         print(f"  note: history has only {len(shas)} commits, charting all of them")
+    if len(shas) > max_commits:
+        mins = len(shas) * 1.5
+        sys.exit(f"that range is {len(shas)} commits, over the --max-commits limit "
+                 f"of {max_commits}.\n"
+                 f"Each one is built and timed, so expect upwards of {mins:.0f} "
+                 f"minutes.\nRaise --max-commits if that is what you want.")
+
     commits = []
     for sha in shas:
-        short = git(repo, "rev-parse", "--short", sha)
-        subject = git(repo, "log", "-1", "--format=%s", sha)
-        commits.append(Commit(sha=sha, short=short, subject=subject))
+        commits.append(Commit(sha=sha,
+                              short=git(repo, "rev-parse", "--short", sha),
+                              subject=git(repo, "log", "-1", "--format=%s", sha)))
     return commits
 
 
@@ -384,7 +445,8 @@ def build_html(commits: list[Commit], svg: str, meta: dict) -> str:
                  if c.verified is not None else "—")
         rows.append(
             f"<tr><td class=m>{esc(c.short)}</td><td>{esc(c.subject)}</td>"
-            f"<td class='m n'>{c.mean:.3f}</td><td class='m n'>&plusmn;{c.stderr:.3f}</td>"
+            f"<td class='m n'>{c.mean:.3f}</td><td class='m n'>"
+            f"{('&plusmn;%.3f' % c.stderr) if len(c.runs) > 1 else '&mdash;'}</td>"
             f"<td class='m n {'good' if d.startswith('-') else ''}'>{d}</td>"
             f"<td class='m n'>{seeds}</td></tr>")
     info = " &middot; ".join(
@@ -439,11 +501,23 @@ standard error; differences smaller than a couple of those are noise.</p>
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Build and benchmark HEAD~N..HEAD, then chart ms/iteration.",
+        description="Build and benchmark a range of commits, then chart ms/iteration.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__.split("Two things")[0].strip())
-    ap.add_argument("-n", "--commits", type=int, default=5, metavar="N",
-                    help="chart HEAD~N through HEAD (default 5)")
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("-n", "--commits", type=int, default=None, metavar="N",
+                       help="chart HEAD~N through HEAD (default 5 if --from is absent)")
+    where.add_argument("--from", "--since", dest="from_commit", default=None,
+                       metavar="COMMIT",
+                       help="chart from this commit through HEAD; takes any revision "
+                            "git understands (hash, tag, branch, HEAD~7). If it is "
+                            "not an ancestor of HEAD, their merge base is used")
+    ap.add_argument("--max-commits", type=int, default=40, metavar="M",
+                    help="refuse ranges longer than this (default 40); every commit "
+                         "is built and timed, so long ranges take hours")
+    ap.add_argument("--no-first-parent", action="store_true",
+                    help="follow every parent through merges instead of just the "
+                         "mainline")
     ap.add_argument("-r", "--runs", type=int, default=4,
                     help="measured rounds per commit (default 4)")
     ap.add_argument("-w", "--warmup", type=int, default=2,
@@ -459,7 +533,12 @@ def main() -> int:
                     help="GPU arch passed to make as ARCH=, e.g. sm_75")
     ap.add_argument("-D", "--make-arg", action="append", default=[],
                     metavar="VAR=VAL", help="extra make argument (repeatable)")
-    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4)
+    ap.add_argument("-P", "--build-workers", type=int, default=None, metavar="W",
+                    help="build this many commits at once, each in its own git "
+                         "worktree (default: cpu count / 4, capped at 4). Every "
+                         "worker runs a full nvcc, so raise it with an eye on RAM")
+    ap.add_argument("-j", "--jobs", type=int, default=None, metavar="J",
+                    help="make -j per worker (default: cpu count / workers)")
     ap.add_argument("-o", "--out", default="bench_out", help="output directory")
     ap.add_argument("--verify", action="store_true",
                     help="also run verify_seeds.py per commit and chart the result")
@@ -507,13 +586,16 @@ def main() -> int:
     except FileExistsError:
         sys.exit(f"another run appears to be active ({lock}); remove it if stale")
 
-    commits = resolve_commits(repo, args.commits)
+    if args.commits is None and args.from_commit is None:
+        args.commits = 5
+    commits = resolve_commits(repo, args.commits, args.from_commit,
+                              not args.no_first_parent, args.max_commits)
     stage = out / "bin"
     stage.mkdir(exist_ok=True)
-    # mkdtemp reserves the name; git worktree add wants to create the directory
-    # itself, so hand it back an unused path rather than an empty one.
-    wt = Path(tempfile.mkdtemp(prefix="bench_wt_"))
-    wt.rmdir()
+    workers = args.build_workers or max(1, min(4, (os.cpu_count() or 4) // 4))
+    workers = max(1, min(workers, len(commits)))
+    jobs = args.jobs or max(1, (os.cpu_count() or 4) // workers)
+    worktrees: list[Path] = []
     started = time.monotonic()
 
     try:
@@ -521,19 +603,45 @@ def main() -> int:
         print(f"seed   : {seed}")
         print(f"commits: {len(commits)}  ({commits[0].short} .. {commits[-1].short})")
         print(f"rounds : {args.warmup} warmup + {args.runs} measured, round-robin")
+        print(f"build  : {workers} worker(s) x make -j{jobs}")
         print(f"output : {out}\n")
 
-        git(repo, "worktree", "add", "--detach", "--force", str(wt), commits[0].sha)
+        # One worktree per worker, created up front. git worktree add touches
+        # shared metadata, so they are made serially; the checkouts afterwards
+        # are per-worktree and safe to run at the same time.
+        for i in range(workers):
+            wt = Path(tempfile.mkdtemp(prefix=f"bench_wt{i}_"))
+            wt.rmdir()   # git wants to create the directory itself
+            git(repo, "worktree", "add", "--detach", "--force",
+                str(wt), commits[0].sha)
+            worktrees.append(wt)
+
+        free: queue.Queue[Path] = queue.Queue()
+        for wt in worktrees:
+            free.put(wt)
+        say = threading.Lock()
+        done = [0]
+
+        def build_one(c: Commit) -> None:
+            wt = free.get()
+            try:
+                t0 = time.monotonic()
+                ok = build_commit(wt, c, stage, make_args, args.print_interval, jobs)
+                dt = time.monotonic() - t0
+                with say:
+                    done[0] += 1
+                    print(f"  [{done[0]:>2}/{len(commits)}] {c.short}  "
+                          f"{'built' if ok else 'FAILED':6} {dt:5.0f}s  "
+                          f"{c.subject[:52]}", flush=True)
+                if not ok:
+                    (out / f"build-fail-{c.short}.log").write_text(c.build_log)
+            finally:
+                free.put(wt)
 
         print("building")
-        for c in commits:
-            t0 = time.monotonic()
-            ok = build_commit(wt, c, stage, make_args, args.print_interval, args.jobs)
-            dt = time.monotonic() - t0
-            print(f"  {c.short}  {'built' if ok else 'FAILED':6}  {dt:5.0f}s  "
-                  f"{c.subject[:56]}", flush=True)
-            if not ok:
-                (out / f"build-fail-{c.short}.log").write_text(c.build_log)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(build_one, commits))
+        print(f"  built in {time.monotonic() - started:.0f}s")
 
         buildable = [c for c in commits if c.binary]
         if len(buildable) < 2:
@@ -588,8 +696,8 @@ def main() -> int:
         print(f"\n{'commit':>9}  {'ms/iter':>9} {'±se':>7} {'vs first':>9}  subject")
         for c in live:
             d = "" if c is live[0] else f"{(c.mean / base - 1) * 100:+.2f}%"
-            print(f"{c.short:>9}  {c.mean:9.3f} {c.stderr:7.3f} {d:>9}  "
-                  f"{c.subject[:48]}")
+            se = f"{c.stderr:7.3f}" if len(c.runs) > 1 else "      -"
+            print(f"{c.short:>9}  {c.mean:9.3f} {se} {d:>9}  {c.subject[:48]}")
         if len(scanned) > 1:
             print("\n  warning: commits scanned different seed counts "
                   f"({sorted(scanned)}); ms/iteration is not directly comparable.")
@@ -635,8 +743,10 @@ def main() -> int:
         return 0
 
     finally:
-        run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)])
-        shutil.rmtree(wt, ignore_errors=True)
+        for wt in worktrees:
+            run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)])
+            shutil.rmtree(wt, ignore_errors=True)
+        run(["git", "-C", str(repo), "worktree", "prune"])
         for f in out.glob("*.out"):
             f.unlink(missing_ok=True)
         try:
