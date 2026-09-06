@@ -1929,6 +1929,52 @@ __device__ inline void compute_cell(const ImprovedNoise &noise, int32_t int_x, i
   c111 = noise.p[(p11 + int_z + 1) & 0xFF];
 }
 
+// One x-plane of the cell: the four corners sharing a value of i, reduced to the
+// pair of coefficients the sample formula needs. Splitting the cell this way lets
+// a cell that advances by one in x reuse its predecessor's right face as its own
+// left face, which is the common case here -- consecutive samples step a quarter
+// of a lattice cell.
+__device__ inline void face_coeffs(const GradDotTable &table, const ImprovedNoise &noise,
+                                   uint8_t plane, int32_t int_y, int32_t int_z,
+                                   float frac_y, float frac_z, float fy, float fz,
+                                   float &g, float &b) {
+  const uint8_t pj0 = noise.p[(plane + int_y) & 0xFF];
+  const uint8_t pj1 = noise.p[(plane + int_y + 1) & 0xFF];
+  const uint8_t c00 = noise.p[(pj0 + int_z) & 0xFF];
+  const uint8_t c10 = noise.p[(pj1 + int_z) & 0xFF];
+  const uint8_t c01 = noise.p[(pj0 + int_z + 1) & 0xFF];
+  const uint8_t c11 = noise.p[(pj1 + int_z + 1) & 0xFF];
+
+  const float dy0 = frac_y;
+  const float dy1 = frac_y - 1.0f;
+  const float dz0 = frac_z;
+  const float dz1 = frac_z - 1.0f;
+
+  const uint32_t h00 = c00 & 0xF, h10 = c10 & 0xF, h01 = c01 & 0xF, h11 = c11 & 0xF;
+  const float b00 = fmaf(dy0, table.y[h00], dz0 * table.z[h00]);
+  const float b10 = fmaf(dy1, table.y[h10], dz0 * table.z[h10]);
+  const float b01 = fmaf(dy0, table.y[h01], dz1 * table.z[h01]);
+  const float b11 = fmaf(dy1, table.y[h11], dz1 * table.z[h11]);
+
+  // lerp2's first weight walks j (fy), its second walks k (fz).
+  g = lerp2(fy, fz, table.x[h00], table.x[h10], table.x[h01], table.x[h11]);
+  b = lerp2(fy, fz, b00, b10, b01, b11);
+}
+
+__device__ inline void cell_coeffs(const GradDotTable &table, const ImprovedNoise &noise,
+                                   int32_t int_x, int32_t int_y, int32_t int_z,
+                                   float frac_y, float frac_z, float fy, float fz,
+                                   float &ga, float &ba, float &gb, float &bb) {
+  face_coeffs(table, noise, noise.p[(int_x) & 0xFF], int_y, int_z, frac_y, frac_z, fy, fz, ga, ba);
+  face_coeffs(table, noise, noise.p[(int_x + 1) & 0xFF], int_y, int_z, frac_y, frac_z, fy, fz, gb, bb);
+}
+
+__forceinline__ __device__ float cell_sample(float frac_x, float fx, float ga, float ba, float gb, float bb) {
+  const float pa = fmaf(frac_x, ga, ba);
+  const float qa = fmaf(frac_x - 1.0f, gb, bb);
+  return fmaf(fx, qa - pa, pa);
+}
+
 __device__ inline float interp(const GradDotTable &table, float frac_x, float frac_y, float frac_z, float fx, float fy, float fz, uint8_t c000, uint8_t c100, uint8_t c010, uint8_t c110, uint8_t c001, uint8_t c101, uint8_t c011, uint8_t c111) {
   float n000 = gradDot(table, c000, frac_x, frac_y, frac_z);
   float n100 = gradDot(table, c100, frac_x - 1.0f, frac_y, frac_z);
@@ -2005,8 +2051,8 @@ __global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<SeedPos>
     int32_t cur_ix1 = 0;
     bool have0 = false;
     bool have1 = false;
-    uint8_t a000, a100, a010, a110, a001, a101, a011, a111;
-    uint8_t b000, b100, b010, b110, b001, b101, b011, b111;
+    float a_ga, a_ba, a_gb, a_bb;
+    float b_ga, b_ba, b_gb, b_bb;
 
     uint32_t local_count = 0;
 #pragma unroll
@@ -2017,23 +2063,39 @@ __global__ __launch_bounds__(threads_per_block) void kernel(InputBuffer<SeedPos>
       const int32_t int_x0 = __float2int_rd(x0c);
       const float frac_x0 = x0c - (float)int_x0;
       if (!have0 || int_x0 != cur_ix0) {
-        compute_cell(oct0, int_x0, int_y0, int_z0, a000, a100, a010, a110, a001, a101, a011, a111);
+        if (have0 && int_x0 == cur_ix0 + 1) {
+          // Stepped one cell along x, so this cell's left face is the face we
+          // already built as the previous cell's right face.
+          a_ga = a_gb;
+          a_ba = a_bb;
+          face_coeffs(shared_grad_dot_table, oct0, oct0.p[(int_x0 + 1) & 0xFF], int_y0, int_z0, frac_y0, frac_z0, fy0, fz0, a_gb, a_bb);
+        } else {
+          cell_coeffs(shared_grad_dot_table, oct0, int_x0, int_y0, int_z0, frac_y0, frac_z0, fy0, fz0, a_ga, a_ba, a_gb, a_bb);
+        }
         cur_ix0 = int_x0;
         have0 = true;
       }
       const float fx0 = smoothstep(frac_x0);
-      const float noise0 = interp(shared_grad_dot_table, frac_x0, frac_y0, frac_z0, fx0, fy0, fz0, a000, a100, a010, a110, a001, a101, a011, a111);
+      const float noise0 = cell_sample(frac_x0, fx0, a_ga, a_ba, a_gb, a_bb);
 
       const float x1c = x_world * if1 + oct1.xo;
       const int32_t int_x1 = __float2int_rd(x1c);
       const float frac_x1 = x1c - (float)int_x1;
       if (!have1 || int_x1 != cur_ix1) {
-        compute_cell(oct1, int_x1, int_y1, int_z1, b000, b100, b010, b110, b001, b101, b011, b111);
+        if (have1 && int_x1 == cur_ix1 + 1) {
+          // Stepped one cell along x, so this cell's left face is the face we
+          // already built as the previous cell's right face.
+          b_ga = b_gb;
+          b_ba = b_bb;
+          face_coeffs(shared_grad_dot_table, oct1, oct1.p[(int_x1 + 1) & 0xFF], int_y1, int_z1, frac_y1, frac_z1, fy1, fz1, b_gb, b_bb);
+        } else {
+          cell_coeffs(shared_grad_dot_table, oct1, int_x1, int_y1, int_z1, frac_y1, frac_z1, fy1, fz1, b_ga, b_ba, b_gb, b_bb);
+        }
         cur_ix1 = int_x1;
         have1 = true;
       }
       const float fx1 = smoothstep(frac_x1);
-      const float noise1 = interp(shared_grad_dot_table, frac_x1, frac_y1, frac_z1, fx1, fy1, fz1, b000, b100, b010, b110, b001, b101, b011, b111);
+      const float noise1 = cell_sample(frac_x1, fx1, b_ga, b_ba, b_gb, b_bb);
 
       float val = 0;
       val += noise0 * vf0;
