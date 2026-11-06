@@ -14,6 +14,18 @@ else
 endif
 
 PRINT_INTERVAL ?= 256
+# MAX_ITERS=n: run n pipeline iterations, shut down cleanly and exit (benchmarks, tests).
+MAX_ITERS ?= 0
+# SEED_ORDER=golden: seed index n -> seed (n*GOLDEN)^SILVER instead of n. Still covers all 2^64
+# seeds exactly once, but each seed's second mix64 is the next seed's first (about 1.08x faster
+# filter_seeds). A given --start covers different seeds than the default order, and the network
+# handshake changes so that mixed builds cannot share a server.
+SEED_ORDER ?= linear
+ifeq ($(SEED_ORDER),golden)
+  SEED_ORDER_GOLDEN := 1
+else
+  SEED_ORDER_GOLDEN := 0
+endif
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
 # - Everything else: use native
@@ -31,7 +43,7 @@ endif
 
 $(info Using ARCH = $(ARCH))
 override CFLAGS += -O3
-override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) -DOMISSION_UNBOUND=$(UNBOUND) -DPRINT_INTERVAL=$(PRINT_INTERVAL)
+override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) -DOMISSION_UNBOUND=$(UNBOUND) -DPRINT_INTERVAL=$(PRINT_INTERVAL) -DMAX_ITERS=$(MAX_ITERS) -DSEED_ORDER_GOLDEN=$(SEED_ORDER_GOLDEN)
 override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per-thread -arch=$(ARCH) -use_fast_math
 
 ifeq ($(OS),Windows_NT)

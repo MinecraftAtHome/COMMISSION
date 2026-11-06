@@ -22,10 +22,11 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
   `./main --device 0,1,... --size 11000000`
 ### Runtime arguments
 ```
-./main [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>]
+./main [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>] [--pipelines <n>]
 ```
 
 - client and server options aren't often used, they were created to network together multiple computers running this app.
+- `--pipelines <n>` (default 1) runs n independent GPU pipelines per device (own stream and buffers, shared seed range). While one pipeline is in its small, latency-bound late stages, another keeps the GPU busy: `--pipelines 2` was ~3% faster on an RTX 4070 Ti. Each pipeline needs the usual ~3 GB of VRAM.
 
 ### Info about device numbers
 - These are just numbers given by the driver to identify your GPUs. You'll probably need to do this via trial and error if you have multiple gpus and you only want some of them running this.
@@ -55,6 +56,12 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
    - Example usage
      `make -B UNBOUND=1`
    - Default is 0, which keeps it within the world border.
+ - MAX_ITERS
+   - Run this many pipeline iterations (2^28 seeds each), shut down cleanly and exit. `0` (default) runs forever.
+   - `tools/bench.sh [iters] [start]` uses it for a fixed-work benchmark with one pipeline.
+ - SEED_ORDER
+   - `linear` (default): `--start` and the seed range mean what they always did.
+   - `golden`: seed index n is checked as seed `(n * 0x9e3779b97f4a7c15) ^ 0x6a09e667f3bcc909`. This still covers every 64-bit seed exactly once, and filter_seeds is ~1.08x faster because each seed's second mix64 is the next seed's first. A given `--start` then covers different seeds, and such builds use a different network handshake.
  - LARGE_BIOMES
    - Changes whether you're using normal (small) biomes, or large biomes.
    - Example usage

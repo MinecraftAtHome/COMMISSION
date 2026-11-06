@@ -99,6 +99,7 @@ bool parse_argument_int(int argc, const char *const *argv, int &i, std::optional
 struct Args {
     std::vector<int> devices;
     std::optional<int> threads;
+    std::optional<int> pipelines;
     std::optional<HostService> client;
     std::optional<HostService> server;
     std::optional<std::string> output_file;
@@ -125,6 +126,8 @@ struct Args {
                     first = ptr;
                     if (first != last) first++;
                 }
+            } else if (std::strcmp("--pipelines", arg) == 0) {
+                if (!parse_argument_int(argc, argv, i, pipelines, [](int n){ return n >= 1 && n <= 8; }, arg)) return false;
             } else if (std::strcmp("--threads", arg) == 0) {
                 if (!parse_argument_int(argc, argv, i, threads, [](int threads){ return threads >= 1 && threads <= 1024; }, arg)) return false;
             } else if (std::strcmp("--client", arg) == 0) {
@@ -193,9 +196,11 @@ uint64_t random_start_seed() {
 }
 
 int main_inner(int argc, char **argv) {
+    // line-buffered even when redirected to a file, so logs survive any kind of exit
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     Args args{};
     if (!args.parse(argc, const_cast<const char **const>(argv))) {
-        std::fprintf(stderr, "Usage:\n%s [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>]\n", argv[0]);
+        std::fprintf(stderr, "Usage:\n%s [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>] [--pipelines <n>]\n", argv[0]);
         return 1;
     }
 
@@ -240,8 +245,13 @@ int main_inner(int argc, char **argv) {
     SeedIterator seed_range(start_seed);
 
     std::vector<std::unique_ptr<GpuThread>> gpu_threads;
+    // Several independent pipelines per device (own stream and buffers, shared seed iterator)
+    // keep the GPU busy through one pipeline's latency-bound tail stages and kernel boundaries.
+    const int pipelines = args.pipelines.value_or(DEFAULT_PIPELINES);
     for (int device : args.devices) {
-        gpu_threads.emplace_back(std::make_unique<GpuThread>(device, std::ref(seed_range), std::ref(gpu_outputs)));
+        for (int p = 0; p < pipelines; p++) {
+            gpu_threads.emplace_back(std::make_unique<GpuThread>(device, std::ref(seed_range), std::ref(gpu_outputs)));
+        }
     }
     if (!gpu_threads.empty()) {
         std::printf("Starting from %" PRIi64 "\n", start_seed);
