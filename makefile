@@ -3,14 +3,22 @@ CUBIOMES_SRC := $(addprefix cubiomes/,biomenoise.c biomes.c finders.c generator.
 LARGE_BIOMES ?= 0
 UNBOUND ?= 0
 
-ifeq (UNBOUND, 1)
-	BIN_SUFFIX += u
+ifeq ($(LARGE_BIOMES),1)
+    BIN_SUFFIX := lb
+else
+    BIN_SUFFIX := sb
 endif
 
-ifeq (LARGE_BIOMES, 1)
-	BIN_SUFFIX += lb
-else
-	BIN_SUFFIX += sb
+ifeq ($(UNBOUND),1)
+    BIN_SUFFIX := $(BIN_SUFFIX)u
+endif
+
+# BOINC=1 builds the BOINC client app (checkpointing, progress reporting,
+# result file via the BOINC API). Requires --start and --end at runtime.
+BOINC ?= 0
+ifeq ($(BOINC),1)
+    BIN_SUFFIX := $(BIN_SUFFIX)-boinc
+    override CXXFLAGS += -DBOINC -I boinc
 endif
 
 PRINT_INTERVAL ?= 256
@@ -34,8 +42,19 @@ override CFLAGS += -O3
 override CXXFLAGS += -O3 -std=c++20 -I asio/asio/include -DOMISSION_LARGE_BIOMES=$(LARGE_BIOMES) -DOMISSION_UNBOUND=$(UNBOUND) -DPRINT_INTERVAL=$(PRINT_INTERVAL)
 override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per-thread -arch=$(ARCH) -use_fast_math
 
+.PHONY: all clean
+
 ifeq ($(OS),Windows_NT)
-all: main.exe
+BIN := main-$(BIN_SUFFIX).exe
+
+ifeq ($(BOINC),1)
+# The prebuilt BOINC libs use the static CRT (/MT), so everything must.
+# Written as -MT: MSYS2 (used by CI) rewrites /MT into a file path.
+override NVCC_FLAGS += -Xcompiler -MT
+BOINC_LIBS := -L boinc/lib/win -lboinc_api -lboinc -luser32 -ladvapi32 -lshell32
+endif
+
+all: $(BIN)
 
 SRC_CPP := $(wildcard src/*.cpp)
 SRC_C   := $(wildcard src/*.c)
@@ -43,12 +62,13 @@ SRC_CU  := $(wildcard src/*.cu)
 SRC     := $(SRC_CPP) $(SRC_C) $(SRC_CU)
 
 clean:
-	del /Q main.exe
+	-del /Q main-*.exe
 
-# nvcc src/*.cpp src/*.c src/*.cu -o main.exe cubiomes/biomenoise.c cubiomes/biomes.c cubiomes/finders.c cubiomes/generator.c cubiomes/layers.c cubiomes/noise.c -arch=native -O3 -std=c++20 -I asio-1.34.2/include -DOMISSION_LARGE_BIOMES=1 --expt-relaxed-constexpr --default-stream per-thread -D_WIN32_WINNT=0x0601
-main.exe: $(SRC) $(CUBIOMES_SRC)
-	nvcc $(SRC) $(CUBIOMES_SRC) -o $@-$(BIN_SUFFIX) $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
+$(BIN): $(SRC) $(CUBIOMES_SRC)
+	nvcc $(SRC) $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601 $(BOINC_LIBS)
 else
+BIN := main-$(BIN_SUFFIX)
+
 override NVCC_FLAGS += -ccbin $(CXX)
 
 MAIN_SRC := src/main.cpp
@@ -78,10 +98,22 @@ else
 	MAIN_CXXFLAGS += -DNO_NET
 endif
 
-all: main
+ifeq ($(BOINC),1)
+	MAIN_SRC += boinc_glue.o
+	MAIN_DEP += boinc_glue.o src/boinc_glue.h
+	MAIN_CXXFLAGS += -L boinc/lib/lin -lboinc_api -lboinc -lpthread
+    # Volunteers run all sorts of distros: don't depend on their libstdc++.
+    ifndef NO_GPU
+        MAIN_CXXFLAGS += -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc
+    else
+        MAIN_CXXFLAGS += -static-libstdc++ -static-libgcc
+    endif
+endif
+
+all: $(BIN)
 
 clean:
-	rm -f main libcubiomes.a biomenoise.o biomes.o finders.o generator.o layers.o noise.o cubiomes.o gpu.o cpu.o client.o server.o
+	rm -f main main-* libcubiomes.a biomenoise.o biomes.o finders.o generator.o layers.o noise.o cubiomes.o gpu.o cpu.o client.o server.o boinc_glue.o
 
 libcubiomes.a: $(CUBIOMES_SRC)
 	$(CC) -c $(CUBIOMES_SRC) -fwrapv $(CFLAGS)
@@ -102,6 +134,9 @@ client.o: src/client.cpp src/client.h src/common.h
 server.o: src/server.cpp src/server.h src/common.h
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
-main: $(MAIN_DEP)
-	$(MAIN_CXX) $(MAIN_SRC) -o $@-$(BIN_SUFFIX) $(MAIN_CXXFLAGS)
+boinc_glue.o: src/boinc_glue.cpp src/boinc_glue.h src/common.h
+	$(CXX) -c $< -o $@ $(CXXFLAGS)
+
+$(BIN): $(MAIN_DEP)
+	$(MAIN_CXX) $(MAIN_SRC) -o $@ $(MAIN_CXXFLAGS)
 endif

@@ -22,8 +22,10 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
   `./main --device 0,1,... --size 11000000`
 ### Runtime arguments
 ```
-./main [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>]
+./main [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--end <end_seed>] [--size <min_size>]
 ```
+
+- `--end` (requires `--start`) stops the search once every seed in `[start, end)` has been checked, instead of running forever.
 
 - client and server options aren't often used, they were created to network together multiple computers running this app.
 
@@ -60,3 +62,7 @@ CUDA app that uses various clever tricks to produce mushroom islands of adequate
    - Example usage
      `make -B LARGE_BIOMES=1` for large biomes
      `make -B LARGE_BIOMES=0` for small biomes (default)
+ - BOINC
+   - Builds the BOINC version of the app (`main-sb-boinc` etc.) with checkpointing and progress reporting. See [BOINC.md](BOINC.md).
+   - Example usage
+     `make -B BOINC=1`
