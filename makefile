@@ -13,6 +13,14 @@ ifeq ($(UNBOUND),1)
     BIN_SUFFIX := $(BIN_SUFFIX)u
 endif
 
+# BOINC=1 builds the BOINC client app (checkpointing, progress reporting,
+# result file via the BOINC API). Requires --start and --end at runtime.
+BOINC ?= 0
+ifeq ($(BOINC),1)
+    BIN_SUFFIX := $(BIN_SUFFIX)-boinc
+    override CXXFLAGS += -DBOINC -I boinc
+endif
+
 PRINT_INTERVAL ?= 256
 # Auto-detect GPU architecture:
 # - RTX 40xx/50xx series: sm_89 is faster than native sm_120
@@ -39,6 +47,12 @@ override NVCC_FLAGS += $(CXXFLAGS) --expt-relaxed-constexpr --default-stream per
 ifeq ($(OS),Windows_NT)
 BIN := main-$(BIN_SUFFIX).exe
 
+ifeq ($(BOINC),1)
+# The prebuilt BOINC libs use the static CRT (/MT), so everything must.
+override NVCC_FLAGS += -Xcompiler /MT
+BOINC_LIBS := -L boinc/lib/win -lboinc_api -lboinc -luser32 -ladvapi32 -lshell32
+endif
+
 all: $(BIN)
 
 SRC_CPP := $(wildcard src/*.cpp)
@@ -50,7 +64,7 @@ clean:
 	-del /Q main-*.exe
 
 $(BIN): $(SRC) $(CUBIOMES_SRC)
-	nvcc $(SRC) $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601
+	nvcc $(SRC) $(CUBIOMES_SRC) -o $@ $(NVCC_FLAGS) -D_WIN32_WINNT=0x0601 $(BOINC_LIBS)
 else
 BIN := main-$(BIN_SUFFIX)
 
@@ -83,10 +97,22 @@ else
 	MAIN_CXXFLAGS += -DNO_NET
 endif
 
+ifeq ($(BOINC),1)
+	MAIN_SRC += boinc_glue.o
+	MAIN_DEP += boinc_glue.o src/boinc_glue.h
+	MAIN_CXXFLAGS += -L boinc/lib/lin -lboinc_api -lboinc -lpthread
+    # Volunteers run all sorts of distros: don't depend on their libstdc++.
+    ifndef NO_GPU
+        MAIN_CXXFLAGS += -Xcompiler -static-libstdc++ -Xcompiler -static-libgcc
+    else
+        MAIN_CXXFLAGS += -static-libstdc++ -static-libgcc
+    endif
+endif
+
 all: $(BIN)
 
 clean:
-	rm -f main main-* libcubiomes.a biomenoise.o biomes.o finders.o generator.o layers.o noise.o cubiomes.o gpu.o cpu.o client.o server.o
+	rm -f main main-* libcubiomes.a biomenoise.o biomes.o finders.o generator.o layers.o noise.o cubiomes.o gpu.o cpu.o client.o server.o boinc_glue.o
 
 libcubiomes.a: $(CUBIOMES_SRC)
 	$(CC) -c $(CUBIOMES_SRC) -fwrapv $(CFLAGS)
@@ -105,6 +131,9 @@ client.o: src/client.cpp src/client.h src/common.h
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
 server.o: src/server.cpp src/server.h src/common.h
+	$(CXX) -c $< -o $@ $(CXXFLAGS)
+
+boinc_glue.o: src/boinc_glue.cpp src/boinc_glue.h src/common.h
 	$(CXX) -c $< -o $@ $(CXXFLAGS)
 
 $(BIN): $(MAIN_DEP)

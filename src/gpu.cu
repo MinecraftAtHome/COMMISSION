@@ -1667,7 +1667,7 @@ struct BufferLens {
 
 
 GpuThread::GpuThread(int device, SeedIterator &input, GpuOutputs &outputs)
-    : Thread(), device(device), input(input), outputs(outputs) {
+    : Thread(), device(device), input(input), outputs(outputs), done_pos(input.pos.load()) {
   start();
 }
 
@@ -1694,6 +1694,7 @@ void GpuThread::run() {
   DeviceBuffer buffer_1(UINT32_C(1) << 31);
   DeviceBuffer buffer_2(UINT32_C(1) << 29);
   std::vector<SeedPos> h_buffer;
+  std::vector<GpuOutput> batch_outputs;
   std::vector<StageStats> stage_stats;
   stage_stats.reserve(16);
 
@@ -1842,20 +1843,29 @@ void GpuThread::run() {
 
     const auto &final_outputs = filter_2.back().outputs;
     const auto &final_outputs_len = *filter_2.back().stage.outputs_len;
+    batch_outputs.clear();
     if (final_outputs_len > 0) {
       // uint32_t len = std::min(final_outputs_len, UINT32_C(10));
       uint32_t len = final_outputs_len;
       h_buffer.resize(len);
       TRY_CUDA(cudaMemcpy(h_buffer.data(), final_outputs.data, sizeof(*h_buffer.data()) * len, cudaMemcpyDeviceToHost));
 
-      {
-        std::lock_guard lock(outputs.mutex);
-        for (const auto &result : h_buffer) {
-          uint64_t seed;
-          TRY_CUDA(cudaMemcpy(&seed, &outputs_filter_seeds.data[result.seed_index], sizeof(seed), cudaMemcpyDeviceToHost));
-          outputs.queue.push({seed, result.x * 4, result.z * 4});
-        }
+      for (const auto &result : h_buffer) {
+        uint64_t seed;
+        TRY_CUDA(cudaMemcpy(&seed, &outputs_filter_seeds.data[result.seed_index], sizeof(seed), cudaMemcpyDeviceToHost));
+        if (!input.contains(seed)) continue;
+        batch_outputs.push_back({seed, result.x * 4, result.z * 4});
       }
+    }
+
+    {
+      // Push this batch's candidates and advance done_pos atomically with
+      // respect to outputs.mutex, so checkpoints never see one without the other.
+      std::lock_guard lock(outputs.mutex);
+      for (const auto &output : batch_outputs) {
+        outputs.queue.push(output);
+      }
+      done_pos.store(start_seed + KernelFilterSeeds::threads_per_run, std::memory_order_relaxed);
     }
 
     if ((i + 1) % PRINT_INTERVAL == 0) {

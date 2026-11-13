@@ -53,6 +53,7 @@ void CpuThread::run() {
             }
             input = inputs.queue.front();
             inputs.queue.pop();
+            current = input;
         }
 
         const auto start = std::chrono::steady_clock::now();
@@ -63,11 +64,16 @@ void CpuThread::run() {
         double time_total = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count() * 1e-9;
         // std::printf("Cpu test took %.3f s\n", time_total);
 
-        if (!output) continue;
-
         {
-            std::lock_guard lock(outputs.mutex);
-            outputs.queue.push(output.value());
+            // Publish the result and retire the input in one step (lock order:
+            // inputs, then outputs), so a checkpoint sees the candidate either
+            // as pending or as done, never both or neither.
+            std::lock_guard input_lock(inputs.mutex);
+            if (output) {
+                std::lock_guard output_lock(outputs.mutex);
+                outputs.queue.push(output.value());
+            }
+            current.reset();
         }
     }
 
