@@ -103,6 +103,7 @@ struct Args {
     std::optional<HostService> server;
     std::optional<std::string> output_file;
     std::optional<int64_t> start_seed;
+    std::optional<int64_t> end_seed;
     std::optional<int32_t> min_size;
 
     bool parse(int argc, const char **const argv) {
@@ -151,6 +152,8 @@ struct Args {
                 output_file = argv[i++];
             } else if (std::strcmp("--start", arg) == 0) {
                 if (!parse_argument_int(argc, argv, i, start_seed, [](int64_t start_seed){ return true; }, arg)) return false;
+            } else if (std::strcmp("--end", arg) == 0) {
+                if (!parse_argument_int(argc, argv, i, end_seed, [](int64_t end_seed){ return true; }, arg)) return false;
             } else if (std::strcmp("--size", arg) == 0) {
                 if (!parse_argument_int(argc, argv, i, min_size, [](int32_t min_size){ return min_size >= 0; }, arg)) return false;
             } else {
@@ -178,6 +181,16 @@ struct Args {
             return false;
         }
 
+        if (end_seed && !start_seed) {
+            std::fprintf(stderr, "--end requires --start\n");
+            return false;
+        }
+
+        if (end_seed && end_seed.value() == start_seed.value()) {
+            std::fprintf(stderr, "--end must not equal --start\n");
+            return false;
+        }
+
         if (min_size && !threads && client) {
             std::fprintf(stderr, "--size does nothing when not running cpu threads\n");
             return false;
@@ -195,7 +208,7 @@ uint64_t random_start_seed() {
 int main_inner(int argc, char **argv) {
     Args args{};
     if (!args.parse(argc, const_cast<const char **const>(argv))) {
-        std::fprintf(stderr, "Usage:\n%s [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>]\n", argv[0]);
+        std::fprintf(stderr, "Usage:\n%s [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--end <end_seed>] [--size <min_size>]\n", argv[0]);
         return 1;
     }
 
@@ -237,7 +250,11 @@ int main_inner(int argc, char **argv) {
 
 #ifndef NO_GPU
     uint64_t start_seed = args.start_seed.value_or(random_start_seed());
-    SeedIterator seed_range(start_seed);
+    std::optional<uint64_t> end_seed;
+    if (args.end_seed) {
+        end_seed = (uint64_t)args.end_seed.value();
+    }
+    SeedIterator seed_range(start_seed, end_seed);
 
     std::vector<std::unique_ptr<GpuThread>> gpu_threads;
     for (int device : args.devices) {
@@ -286,6 +303,12 @@ int main_inner(int argc, char **argv) {
             std::lock_guard lock(gpu_outputs.mutex);
             std::printf("gpu_outputs.queue.size() = %zu\n", gpu_outputs.queue.size());
         }
+
+#ifndef NO_GPU
+        if (seed_range.exhausted()) {
+            running.store(false, std::memory_order_relaxed);
+        }
+#endif
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
