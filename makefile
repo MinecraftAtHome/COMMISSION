@@ -49,7 +49,8 @@ BIN := main-$(BIN_SUFFIX).exe
 
 ifeq ($(BOINC),1)
 # The prebuilt BOINC libs use the static CRT (/MT), so everything must.
-override NVCC_FLAGS += -Xcompiler /MT
+# Written as -MT: MSYS2 (used by CI) rewrites /MT into a file path.
+override NVCC_FLAGS += -Xcompiler -MT
 BOINC_LIBS := -L boinc/lib/win -lboinc_api -lboinc -luser32 -ladvapi32 -lshell32
 endif
 
